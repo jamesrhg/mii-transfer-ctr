@@ -26,11 +26,13 @@ enum class State {
 // Kicks off the connection attempt and returns immediately - everything it
 // does (acInit(), ACU_ConnectAsync(), etc) is fast/non-blocking, so no
 // background thread is spawned for this call itself; the connection
-// proceeds independently at the kernel level from here. Call once, early,
+// proceeds independently at the kernel level from here. Called once, early,
 // from main() - safe to call even if it's never followed by a
 // WaitUntilDone()/Poll() call from anyone (e.g. if both MiiHttpServer and
 // the startup network check happen to be skipped before reaching that
-// point).
+// point). Also safe to call again later to retry (main.cpp does, once the
+// wireless switch is confirmed back on after a switch-off failure) -
+// resets the previous attempt's outcome first.
 void BeginConnect();
 
 // True if the physical wireless switch is off - checked via

@@ -22,13 +22,36 @@ Handle g_connectEvent = 0;
 } // namespace
 
 void BeginConnect() {
-    if (R_FAILED(acInit())) {
+    // Safe to call more than once (e.g. main.cpp's own retry once the
+    // wireless switch is confirmed back on after a switch-off failure) -
+    // resets the previous attempt's outcome and starts a fresh one, but
+    // only calls acInit() the first time (repeat calls would either be a
+    // pointless no-op refcount bump or, worse, actually re-run its own
+    // first-time-only setup - never verified which, no reason to risk it
+    // when just skipping the repeat call is free).
+    {
         std::lock_guard<std::mutex> lock(g_mutex);
+        g_done = false;
         g_connected = false;
-        g_done = true;
-        return;
     }
-    g_acInitialized = true;
+    if (g_connectEvent) {
+        // Leftover from a previous attempt that never got its event
+        // consumed by Poll()/WaitUntilDone() (shouldn't normally happen,
+        // but a retry doesn't get to assume the previous attempt was
+        // cleanly resolved).
+        svcCloseHandle(g_connectEvent);
+        g_connectEvent = 0;
+    }
+
+    if (!g_acInitialized) {
+        if (R_FAILED(acInit())) {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            g_connected = false;
+            g_done = true;
+            return;
+        }
+        g_acInitialized = true;
+    }
 
     // All of this is fast and non-blocking - ACU_ConnectAsync() itself
     // returns immediately and signals g_connectEvent once the connection

@@ -161,6 +161,24 @@ int g_windowStart[3] = {-1, -1, -1};
 // time (matches the Wii U build's own comment on this).
 std::vector<int> g_pendingFetch;
 
+// Set on any failed fetch attempt (network error, or a downloaded file that
+// failed to decode), cleared the moment a later one succeeds - see
+// LastFetchFailed()'s own comment. g_lastFetchFailedAtMs also drives the
+// retry backoff below - see Update()'s own comment on why that exists at
+// all.
+bool g_lastFetchFailed = false;
+u64 g_lastFetchFailedAtMs = 0;
+// How long to wait after a failed fetch before attempting another one at
+// all (any key, not just the one that just failed - see Update()'s own
+// comment). Confirmed on-device as necessary, not just a nicety: with no
+// internet, every attempt fails the same way, and the previous code (no
+// backoff at all) re-queued and re-attempted the focused Mii's fetch every
+// single Update() call via the safety net below - each attempt still a
+// real blocking httpc call that can take real seconds to time out with no
+// network to fail fast against, so the app was seconds-per-frame at best,
+// indistinguishable from a hang/crash to the user.
+constexpr u64 kRetryBackoffMs = 4000;
+
 void RebuildWindow(Tab tab, const std::vector<Ver3MiiDecoded> &miis, int windowStart) {
     g_windowStart[static_cast<int>(tab)] = windowStart;
     int lastIndex = static_cast<int>(miis.size()) - 1;
@@ -244,15 +262,28 @@ void Update(Tab tab, const std::vector<Ver3MiiDecoded> &miis, int focusedIndex) 
     // window's entire fetch time - the render loop still gets a frame in
     // between each fetch, so the UI stays responsive (if not instantly
     // populated) even though nothing here is actually concurrent.
-    if (!g_pendingFetch.empty()) {
+    //
+    // Gated on the retry backoff (see kRetryBackoffMs's own comment) -
+    // skipped entirely, not just this key, while a previous failure is
+    // still cooling down: g_pendingFetch is left untouched either way, so
+    // whatever's at the front just gets tried again once the backoff
+    // passes, same as if this whole block had simply run a few frames
+    // later.
+    bool backoffActive = g_lastFetchFailed && (osGetTime() - g_lastFetchFailedAtMs) < kRetryBackoffMs;
+    if (!g_pendingFetch.empty() && !backoffActive) {
         int key = g_pendingFetch.front();
         g_pendingFetch.erase(g_pendingFetch.begin());
         int idx = key % kTabIndexStride;
         MiiImageFetcher::Result fetchResult =
             MiiImageFetcher::FetchImageBlocking(miis[static_cast<size_t>(idx)].storeData, IMAGE_REQUEST_PX);
-        if (fetchResult.success) {
-            PngTexture::Texture tex = PngTexture::LoadFromMemory(fetchResult.pngBytes.data(), fetchResult.pngBytes.size());
-            if (tex.valid) g_cache.Insert(key, tex);
+        PngTexture::Texture tex{};
+        if (fetchResult.success) tex = PngTexture::LoadFromMemory(fetchResult.pngBytes.data(), fetchResult.pngBytes.size());
+        if (tex.valid) {
+            g_cache.Insert(key, tex);
+            g_lastFetchFailed = false;
+        } else {
+            g_lastFetchFailed = true;
+            g_lastFetchFailedAtMs = osGetTime();
         }
     }
 
@@ -292,11 +323,15 @@ void Draw(float eyeOffsetPx) {
     }
 }
 
+bool LastFetchFailed() { return g_lastFetchFailed; }
+
 void Shutdown() {
     g_cache.Clear();
     g_pendingFetch.clear();
     g_windowStart[0] = g_windowStart[1] = g_windowStart[2] = -1;
     g_focusedIndex = -1;
+    g_lastFetchFailed = false;
+    g_lastFetchFailedAtMs = 0;
 }
 
 } // namespace MiiDetailPanel

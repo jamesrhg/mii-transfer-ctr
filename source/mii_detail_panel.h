@@ -56,6 +56,16 @@ void Update(Tab tab, const std::vector<Ver3MiiDecoded> &miis, int focusedIndex);
 // pass 0.0f for a flat/non-stereo draw. See this header's own note above.
 void Draw(float eyeOffsetPx = 0.0f);
 
+// True if the most recently *attempted* portrait fetch failed (network
+// error, or a downloaded file that failed to decode) and no fetch has
+// succeeded since - not tied to any specific Mii, since with no network at
+// all every fetch fails the same way regardless of which one it was for.
+// main.cpp uses this to show a persistent warning that clears the moment
+// some later fetch actually succeeds - see Update()'s own retry-backoff
+// comment for why fetch attempts themselves are also throttled after a
+// failure, not just reported.
+bool LastFetchFailed();
+
 void Shutdown();
 
 } // namespace MiiDetailPanel

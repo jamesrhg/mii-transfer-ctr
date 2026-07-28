@@ -119,6 +119,15 @@ constexpr float TOP_HINT_SCALE = 0.55f;
 constexpr float TOP_HINT_X = 8.0f;
 constexpr float TOP_HINT_Y = 6.0f;
 
+// Portrait-fetch error banner, directly below the X-to-host reminder above -
+// shown whenever MiiDetailPanel::LastFetchFailed() is true (a download or
+// decode failure, most likely no internet), cleared automatically the
+// moment a later fetch succeeds - see that function's own comment. Red,
+// distinct from every other on-screen text color, since this is the one
+// thing on screen actually reporting an error rather than just status.
+constexpr float TOP_FETCH_ERROR_SCALE = 0.5f;
+constexpr float TOP_FETCH_ERROR_Y = TOP_HINT_Y + 30.0f * TOP_HINT_SCALE + 4.0f;
+
 // App version, top-right corner of the top screen, same row as the X-to-
 // host reminder above. A notch bigger than TOP_HINT_SCALE (system font
 // glyph height is 30px at scale 1.0, so +0.05 is +1.5px) rather than
@@ -158,6 +167,12 @@ constexpr float MAX_3D_DEPTH_PX = 8.0f;
 // actually scrolls, rather than making the initial freeze longer than it
 // needs to be for portraits that might not even get looked at right away.
 constexpr int INITIAL_PRELOAD_COUNT = 20;
+
+// How long the "HOME Menu is disabled while loading." indicator stays up
+// after a single rejected HOME press (see RunInitialPreload()'s own
+// comment) - the press itself is a one-frame event, so this just gives a
+// human enough time to actually read the message before it clears.
+constexpr u64 kHomeRejectedIndicatorMs = 2000;
 
 // A small right-pointing triangle, vertically centered on a ROW_HEIGHT-tall
 // row starting at rowTop, sitting just left of LIST_LEFT.
@@ -494,41 +509,69 @@ int main() {
         libraryTab.focusedIndex = libraryTab.miis.empty() ? -1 : 0;
         if (libraryTab.miis.empty()) return;
 
-        // One "Loading..." frame - just AnimatedBg (kept, per request) and
-        // centered text, no list/portrait yet - then block to fetch the
-        // first INITIAL_PRELOAD_COUNT portraits in a tight loop, all before
-        // the real UI ever shows. This trades a longer single pause at
-        // startup for not showing the list/portrait area gradually filling
-        // in one fetch per rendered frame - see MiiDetailPanel::Update()'s
-        // own comment for why each fetch itself is still synchronous
-        // (blocking, no background thread) regardless of which of these
-        // two pacing styles calls it.
-        CtrLog::Printf("drawing loading screen");
-        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-        CtrUi::BeginFrame();
+        // The "Loading..." screen, redrawn once per preload iteration (not
+        // a single static frame) so it can actually service input and show
+        // a response to a HOME press - see aptSetHomeAllowed() below. This
+        // trades a longer, incrementally-drawn startup pause for not
+        // showing the list/portrait area gradually filling in one fetch
+        // per rendered frame later - see MiiDetailPanel::Update()'s own
+        // comment for why each fetch itself is still synchronous
+        // (blocking, no background thread) regardless of pacing style.
+        //
+        // HOME disabled only for this specific window (not the network-
+        // check/error screens before it, not the real app after it) - per
+        // request: this is startup-only "don't interrupt the initial
+        // load" protection, not a general lockout. libctru's own apt.h
+        // doc comment on aptCheckHomePressRejected() is explicit that nothing
+        // shows a "HOME disabled" indicator automatically - the app is
+        // expected to poll it and draw its own (there's no system applet
+        // involved in that specific indicator at all, despite how it might
+        // look from the outside - ErrDisp/"erreula" is a different, much
+        // heavier system applet for actual crash/error screens, unrelated
+        // to this).
+        CtrLog::Printf("drawing loading screen, HOME button disabled for its duration");
+        aptSetHomeAllowed(false);
+        u64 homeRejectedUntilMs = 0; // >0 while the "HOME Menu is disabled" indicator should be shown
 
-        // Single-eye only (topTargetLeft) - gfxSet3D(true) isn't called
-        // until just after this returns (see its own call site), so
-        // there's no stereo output to draw for the right eye at all.
-        float loadingW = 0.0f, loadingH = 0.0f;
-        CtrUi::MeasureText(LOADING_SCALE, "Loading...", &loadingW, &loadingH);
-        C2D_TargetClear(topTargetLeft, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
-        C2D_SceneBegin(topTargetLeft);
-        AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
-        CtrUi::DrawText((TOP_W - loadingW) / 2.0f, (TOP_H - loadingH) / 2.0f, LOADING_SCALE,
-                         C2D_Color32(255, 255, 255, 255), "Loading...");
+        for (int i = 0; i < INITIAL_PRELOAD_COUNT && aptMainLoop(); i++) {
+            hidScanInput();
+            if (aptCheckHomePressRejected()) {
+                CtrLog::Printf("HOME press rejected during loading screen");
+                homeRejectedUntilMs = osGetTime() + kHomeRejectedIndicatorMs;
+            }
 
-        C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
-        C2D_SceneBegin(bottomTarget);
-        AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+            CtrUi::BeginFrame();
 
-        C3D_FrameEnd(0);
-        CtrLog::Printf("loading screen drawn, preloading first %d portraits", INITIAL_PRELOAD_COUNT);
+            // Single-eye only (topTargetLeft) - gfxSet3D(true) isn't called
+            // until this whole lambda returns (see its own call site), so
+            // there's no stereo output to draw for the right eye at all.
+            float loadingW = 0.0f, loadingH = 0.0f;
+            CtrUi::MeasureText(LOADING_SCALE, "Loading...", &loadingW, &loadingH);
+            C2D_TargetClear(topTargetLeft, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
+            C2D_SceneBegin(topTargetLeft);
+            AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
+            CtrUi::DrawText((TOP_W - loadingW) / 2.0f, (TOP_H - loadingH) / 2.0f, LOADING_SCALE,
+                             C2D_Color32(255, 255, 255, 255), "Loading...");
 
-        for (int i = 0; i < INITIAL_PRELOAD_COUNT; i++) {
+            C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
+            C2D_SceneBegin(bottomTarget);
+            AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
+            if (osGetTime() < homeRejectedUntilMs) {
+                float w = 0.0f, h = 0.0f;
+                const char *text = "HOME Menu is disabled while loading.";
+                CtrUi::MeasureText(BOTTOM_HINT_SCALE, text, &w, &h);
+                CtrUi::DrawText((static_cast<float>(BOTTOM_W) - w) / 2.0f, (static_cast<float>(BOTTOM_H) - h) / 2.0f,
+                                 BOTTOM_HINT_SCALE, C2D_Color32(255, 70, 70, 255), text);
+            }
+
+            C3D_FrameEnd(0);
+
             MiiDetailPanel::Update(MiiDetailPanel::Tab::Library, libraryTab.miis, 0);
         }
-        CtrLog::Printf("initial preload done");
+
+        aptSetHomeAllowed(true);
+        CtrLog::Printf("initial preload done, HOME button re-enabled");
     };
 
     while (aptMainLoop()) {
@@ -568,27 +611,45 @@ int main() {
         }
 
         // NetworkGate resolution - see Screen::NetworkGate's own comment.
-        // wirelessOff is already known (checked once, before the loop); a
-        // still-Connecting Poll() here just means keep showing the
+        // A still-Connecting Poll() here just means keep showing the
         // "Checking network connection..." frame below and try again next
         // frame, until either it resolves or kNetworkCheckTimeoutMs passes.
         if (screen == Screen::NetworkGate) {
-            CtrNetwork::State netState = wirelessOff ? CtrNetwork::State::Failed : CtrNetwork::Poll();
-            bool timedOut = !wirelessOff && netState == CtrNetwork::State::Connecting &&
-                             (osGetTime() - networkCheckStartMs) >= kNetworkCheckTimeoutMs;
-            if (netState == CtrNetwork::State::Connected) {
-                CtrLog::Printf("network check: connected");
-                RunInitialPreload();
-                // Only now, right before the real list/portrait UI is what's
-                // about to show - not during any of the screens before it
-                // (see gfxInitDefault()'s own comment on why) - since this is
-                // what actually lights the 3D LED.
-                gfxSet3D(true);
-                screen = Screen::List;
-            } else if (netState == CtrNetwork::State::Failed || timedOut) {
-                CtrLog::Printf("network check: failed (wirelessOff=%d timedOut=%d) - showing blocking error screen",
-                                wirelessOff, timedOut);
-                networkCheckFailed = true; // stays on Screen::NetworkGate - the render block below shows the terminal error text
+            // Re-checked every frame while this screen is up (not just
+            // once, before the loop) specifically so turning the wireless
+            // switch back on while the "please enable wireless" error is
+            // showing can retry automatically, below - the switch's own
+            // physical state is cheap to query and can change at any time,
+            // independent of whatever BeginConnect()'s own attempt is doing.
+            bool nowWirelessOff = CtrNetwork::IsWirelessSwitchOff();
+            if (networkCheckFailed && wirelessOff && !nowWirelessOff) {
+                CtrLog::Printf("wireless switch back on - retrying connection");
+                wirelessOff = false;
+                networkCheckFailed = false;
+                networkCheckStartMs = osGetTime();
+                CtrNetwork::BeginConnect(); // safe to call again - see its own comment
+            } else {
+                wirelessOff = nowWirelessOff;
+            }
+
+            if (!networkCheckFailed) {
+                CtrNetwork::State netState = wirelessOff ? CtrNetwork::State::Failed : CtrNetwork::Poll();
+                bool timedOut = !wirelessOff && netState == CtrNetwork::State::Connecting &&
+                                 (osGetTime() - networkCheckStartMs) >= kNetworkCheckTimeoutMs;
+                if (netState == CtrNetwork::State::Connected) {
+                    CtrLog::Printf("network check: connected");
+                    RunInitialPreload();
+                    // Only now, right before the real list/portrait UI is
+                    // what's about to show - not during any of the screens
+                    // before it (see gfxInitDefault()'s own comment on why) -
+                    // since this is what actually lights the 3D LED.
+                    gfxSet3D(true);
+                    screen = Screen::List;
+                } else if (netState == CtrNetwork::State::Failed || timedOut) {
+                    CtrLog::Printf("network check: failed (wirelessOff=%d timedOut=%d) - showing blocking error screen",
+                                    wirelessOff, timedOut);
+                    networkCheckFailed = true; // stays on Screen::NetworkGate - the render block below shows the terminal error text
+                }
             }
         }
 
@@ -969,6 +1030,10 @@ int main() {
             CtrUi::DrawText(TOP_HINT_X, TOP_HINT_Y, TOP_HINT_SCALE, C2D_Color32(255, 255, 255, 255),
                              "Press X to host Mii server");
             CtrUi::DrawText(versionX, TOP_HINT_Y, TOP_VERSION_SCALE, C2D_Color32(255, 255, 255, 255), APP_VERSION_TEXT);
+            if (MiiDetailPanel::LastFetchFailed()) {
+                CtrUi::DrawText(TOP_HINT_X, TOP_FETCH_ERROR_Y, TOP_FETCH_ERROR_SCALE, C2D_Color32(255, 70, 70, 255),
+                                 "Could not download Mii image - check your internet connection.");
+            }
 
             C2D_TargetClear(topTargetRight, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
             C2D_SceneBegin(topTargetRight);
@@ -977,6 +1042,10 @@ int main() {
             CtrUi::DrawText(TOP_HINT_X, TOP_HINT_Y, TOP_HINT_SCALE, C2D_Color32(255, 255, 255, 255),
                              "Press X to host Mii server");
             CtrUi::DrawText(versionX, TOP_HINT_Y, TOP_VERSION_SCALE, C2D_Color32(255, 255, 255, 255), APP_VERSION_TEXT);
+            if (MiiDetailPanel::LastFetchFailed()) {
+                CtrUi::DrawText(TOP_HINT_X, TOP_FETCH_ERROR_Y, TOP_FETCH_ERROR_SCALE, C2D_Color32(255, 70, 70, 255),
+                                 "Could not download Mii image - check your internet connection.");
+            }
             if (logThisFrame) CtrLog::Printf("frame %d: top screen (both eyes) drawn", frameCounter);
 
             C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
