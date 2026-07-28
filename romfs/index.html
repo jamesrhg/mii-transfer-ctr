@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mii Transfer (3DS)</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      margin: 30px;
+      -webkit-animation: bgMove 20s linear infinite;
+      animation: bgMove 20s linear infinite;
+      background: url(/bg.png) #1a1a2e;
+    }
+
+    @keyframes bgMove {
+      from {
+        background-position: 0 0;
+      }
+
+      to {
+        background-position: 256px 256px;
+      }
+    }
+
+
+    @-webkit-keyframes bgMove {
+      from {
+        background-position: 0 0;
+      }
+
+      to {
+        background-position: 256px 256px;
+      }
+    }
+
+    a {
+      color: #78d2f0;
+    }
+
+    h1 {
+      margin-bottom: 10px;
+    }
+
+    .hint {
+      color: #454545;
+      font-size: 16px;
+    }
+
+    button {
+      background: #2a2a44;
+      color: #eee;
+      border: 1px solid #555;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .status {
+      color: #aaa;
+      font-style: italic;
+    }
+
+    .tabs {
+      margin-top: 24px;
+      max-width: 1040px;
+      border-bottom: 1px solid #444;
+    }
+
+    .tab-btn {
+      background: #e5e5e5;
+      border: 1px solid #fff;
+      color: #323232;
+      border-bottom: none;
+      border-radius: 4px 4px 0 0;
+      margin-right: 5px;
+      padding: 9px 15px;
+      font-size: 18px;
+      position: relative;
+      top: 1px;
+    }
+
+    .tab-btn.active {
+      box-shadow: 0px 2px 2px 0px inset rgba(0, 0, 0, 0.30);
+      font-weight: bold;
+    }
+
+    .tab-panel {
+      border: 1px solid #ffffff;
+      border-top: none;
+      padding: 10px;
+      max-width: 1040px;
+      background: #e5e5e5;
+      border-bottom-right-radius: 4px;
+      border-top-right-radius: 4px;
+      border-bottom-left-radius: 4px;
+    }
+
+    .mii-list {
+      display: block;
+    }
+
+    .mii-list:after {
+      content: "";
+      clear: both;
+      display: block;
+    }
+
+    .mii-row {
+      display: block;
+      float: left;
+      background: #ffffff;
+      border: 1px solid #b1b1b1;
+      box-shadow: 0px 2px #b1b1b1;
+      border-radius: 6px;
+      height: 65px;
+      padding: 12px;
+      padding-bottom: 3px;
+      color: #323232;
+      position: relative;
+      width: 225px;
+      margin: 4px;
+      cursor: pointer;
+    }
+
+    .mii-row:hover {
+      background: #f0f0f0;
+    }
+
+    .mii-row:active {
+      top: 4px;
+      box-shadow: none;
+    }
+
+    .mii-face {
+      width: 54px;
+      height: 54px;
+      float: left;
+      border-radius: 4px;
+      background: #d8d8d8;
+      box-shadow: 0px -1px 1px 0px rgba(0, 0, 0, 0.30);
+      margin-right: 10px;
+    }
+
+    .creator {
+      color: #757575;
+      font-size: 14px;
+    }
+
+    .search-bar {
+      margin-top: 10px;
+      max-width: 780px;
+    }
+
+    .search-bar input {
+      width: 100%;
+      -webkit-box-sizing: border-box;
+      box-sizing: border-box;
+      background: #fff;
+      color: #323232;
+      border: 1px solid #3a3a3a;
+      border-radius: 4px;
+      padding: 10px;
+      font-size: 17px;
+    }
+
+    .no-results {
+      display: none;
+      font-size: 19px;
+    }
+
+    @media only screen and (max-width: 886px) {
+      .mii-row {
+        width: 44%;
+      }
+    }
+
+    @media only screen and (max-width: 728px) {
+
+      body {
+        margin: 30px 15px;
+      }
+
+      .mii-row {
+        width: 100%;
+        margin: 0;
+        height: 80px;
+        padding: 13px;
+        padding-top: 14px;
+        -webkit-box-sizing: border-box;
+        box-sizing: border-box;
+        padding-bottom: 0;
+        position: relative;
+        float: none;
+        display: block;
+        margin-bottom: 12px;
+      }
+    }
+
+    @media only screen and (max-width: 415px) {
+      .tab-btn {
+        display: block;
+        top: 0px;
+        width: 100%;
+        border-color: #a0a0a0;
+        border-radius: 0px;
+      }
+
+      .tab-panel {
+        border-top-right-radius: 0px;
+      }
+
+      .tabs {
+        border-bottom: 1px solid #a0a0a0;
+      }
+
+      .tab-btn.active {
+        box-shadow: 0px 0px 3px 1px inset rgba(0, 0, 0, 0.30);
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Mii Transfer (3DS)</h1>
+  <p>Download Mii data from your Nintendo 3DS console for use in other programs such as <a target="_blank" href="https://mii.nxw.pw/">Mii Creator</a>.<br><br>
+    <b>To download any of these Miis, please click them</b>, to convert the downloaded Mii data into other formats, use <a target="_blank" href="https://mii-unsecure.ariankordi.net/">Mii Unsecure</a>.
+  </p>
+
+  <div class="search-bar">
+    <input type="text" id="mii-search" placeholder="Search Miis by name or creator..." oninput="filterMiiLists()">
+  </div>
+
+  <div class="tabs">
+    <button type="button" class="tab-btn active" id="tab-btn-odb" onclick="selectTab('odb')">Mii Library</button>
+    <button type="button" class="tab-btn" id="tab-btn-recent" onclick="selectTab('recent')">Recent Miis</button>
+    <button type="button" class="tab-btn" id="tab-btn-fp" onclick="selectTab('fp')">Friends</button>
+  </div>
+
+  <div id="panel-odb" class="tab-panel">
+    <p class="hint">Miis shown here are part of your Mii Maker library, to see Miis you've recently played with or your Friend List, check their corresponding tabs.</p>
+    <div id="odb-list" class="status">Loading...</div>
+    <p id="odb-no-results" class="hint no-results">No Miis match your search.</p>
+  </div>
+
+  <div id="panel-recent" class="tab-panel" style="display: none;">
+    <p class="hint">Miis from people you've recently played with.</p>
+    <div id="recent-list" class="status">Loading...</div>
+    <p id="recent-no-results" class="hint no-results">No Miis match your search.</p>
+  </div>
+
+  <div id="panel-fp" class="tab-panel" style="display: none;">
+    <p class="hint">Miis from the current user's Friend List</p>
+    <div id="fp-list" class="status">Loading...</div>
+    <p id="fp-no-results" class="hint no-results">No Miis match your search.</p>
+  </div>
+
+  <script src="/mii-parser.js"></script>
+  <script>
+    // All the actual CFL_DB.dat / fp_db.dat parsing, and the binary-safe
+    // XMLHttpRequest/ActiveX loading, lives in mii-parser.js
+    // (window.MiiParser) - see that file's header comment. This is just the
+    // page glue: load, parse, render, and the 3-tab switcher. Written in
+    // plain ES5 (var, function expressions, no arrow functions, no
+    // let/const, no template literals, no fetch/Promise) so it also runs on
+    // old browsers that only have XMLHttpRequest via ActiveXObject.
+
+    var TAB_NAMES = ["odb", "recent", "fp"];
+    var activeTab = "odb";
+
+    var SOURCES = {
+      odb: {
+        url: "/data/CFL_DB.dat",
+        listId: "odb-list",
+        kind: "cfldb"
+      },
+      // No `url` of its own - the "Recent Miis" (CFRA) section lives inside
+      // the same CFL_DB.dat file as the Library tab, not a separate server
+      // endpoint - loadMiiList("odb") below parses this tab's data out of
+      // that same downloaded byte array, via MiiParser.parseCflDbRecent().
+      recent: {
+        listId: "recent-list",
+        kind: "cfldb-recent"
+      },
+      fp: {
+        url: "/data/fp_db.dat",
+        listId: "fp-list",
+        kind: "raw"
+      }
+    };
+
+    function addClass(el, cls) {
+      if ((" " + el.className + " ").indexOf(" " + cls + " ") === -1) {
+        el.className = el.className ? el.className + " " + cls : cls;
+      }
+    }
+
+    function removeClass(el, cls) {
+      var parts = el.className.split(" ");
+      var out = [];
+      for (var i = 0; i < parts.length; i++) {
+        if (parts[i] !== cls) out.push(parts[i]);
+      }
+      el.className = out.join(" ");
+    }
+
+    function selectTab(name) {
+      for (var i = 0; i < TAB_NAMES.length; i++) {
+        var n = TAB_NAMES[i];
+        document.getElementById("panel-" + n).style.display = (n === name) ? "block" : "none";
+        var btn = document.getElementById("tab-btn-" + n);
+        if (n === name) {
+          addClass(btn, "active");
+        } else {
+          removeClass(btn, "active");
+        }
+      }
+      activeTab = name;
+      filterMiiLists();
+    }
+
+    function escapeHtml(s) {
+      var map = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;"
+      };
+      return s.replace(/[&<>"']/g, function(c) {
+        return map[c];
+      });
+    }
+
+    function setStatus(container, text) {
+      container.className = "status";
+      container.innerHTML = "";
+      container.appendChild(document.createTextNode(text));
+    }
+
+    function sanitizeFileName(name) {
+      var out = name.replace(/[\\/:*?"<>|]/g, "_").replace(/^\s+|\s+$/g, "");
+      return out || "mii";
+    }
+
+    // mii.raw is already a valid 96-byte CFLStoreData (Ver3StoreData) blob
+    // straight from mii-parser.js, for all three sources - this saves it
+    // verbatim, unmodified, as a ".cfsd" file (was ".ffsd" - the Wii U
+    // build's own FFLStoreData-derived naming, left over from this file
+    // being copied verbatim into this project; the bytes are identical
+    // either way, Ver3StoreData/FFLStoreData/CFLStoreData are the same
+    // format - only the extension is this project's own naming).
+    function downloadMii(mii) {
+      var bytes = new Uint8Array(mii.raw.length);
+      for (var i = 0; i < mii.raw.length; i++) bytes[i] = mii.raw[i];
+
+      var blob = new Blob([bytes], {
+        type: "application/octet-stream"
+      });
+      var fileName = sanitizeFileName(mii.nickname || "mii") + ".cfsd";
+
+      if (window.navigator && window.navigator.msSaveOrOpenBlob) {
+        window.navigator.msSaveOrOpenBlob(blob, fileName);
+        return;
+      }
+
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function() {
+        URL.revokeObjectURL(url);
+      }, 1000);
+    }
+
+    function renderMiiList(container, miis) {
+      if (miis.length === 0) {
+        setStatus(container, "No Miis found.");
+        return;
+      }
+      container.className = "mii-list";
+      container.innerHTML = "";
+      for (var i = 0; i < miis.length; i++) {
+        var mii = miis[i];
+        var nickname = mii.nickname || "(no name)";
+
+        var row = document.createElement("div");
+        row.className = "mii-row";
+        row.title = "Click to download " + nickname + ".cfsd";
+        row.setAttribute("data-search", (nickname + " " + (mii.creatorName || "")).toLowerCase());
+        row.onclick = (function(m) {
+          return function() {
+            downloadMii(m);
+          };
+        })(mii);
+
+        var img = document.createElement("img");
+        img.className = "mii-face";
+        img.alt = nickname;
+        img.src = MiiParser.faceImageUrl(mii, {
+          width: 106
+        });
+
+        var label = document.createElement("div");
+        label.innerHTML = "<strong>" + escapeHtml(nickname) + "</strong>" +
+          (mii.creatorName ? "<br><span class=\"creator\">" + escapeHtml(mii.creatorName) + "</span>" : "");
+
+        row.appendChild(img);
+        row.appendChild(label);
+        container.appendChild(row);
+      }
+    }
+
+    function filterMiiLists() {
+      var query = document.getElementById("mii-search").value.replace(/^\s+|\s+$/g, "").toLowerCase();
+      var src = SOURCES[activeTab];
+      var container = document.getElementById(src.listId);
+      var noResults = document.getElementById(activeTab + "-no-results");
+
+      if (container.className !== "mii-list") {
+        noResults.style.display = "none";
+        return;
+      }
+
+      var visibleCount = 0;
+      var rows = container.getElementsByClassName("mii-row");
+      for (var j = 0; j < rows.length; j++) {
+        var row = rows[j];
+        var match = query === "" || row.getAttribute("data-search").indexOf(query) !== -1;
+        row.style.display = match ? "" : "none";
+        if (match) visibleCount++;
+      }
+      noResults.style.display = visibleCount === 0 ? "block" : "none";
+    }
+
+    function loadMiiList(key) {
+      var src = SOURCES[key];
+      var container = document.getElementById(src.listId);
+      setStatus(container, "Loading...");
+
+      MiiParser.loadBinary(src.url, function(bytes) {
+        var miis;
+        if (src.kind === "cfldb") {
+          try {
+            miis = MiiParser.parseCflDb(bytes);
+          } catch (e) {
+            setStatus(container, "Could not parse CFL_DB.dat: " + e.message);
+            return;
+          }
+          renderMiiList(container, miis);
+
+          // The "Recent Miis" tab has no server endpoint of its own (see
+          // SOURCES.recent's own comment) - its data lives inside this same
+          // CFL_DB.dat download, so it's parsed and rendered right here
+          // instead of issuing a second request.
+          var recentContainer = document.getElementById(SOURCES.recent.listId);
+          try {
+            renderMiiList(recentContainer, MiiParser.parseCflDbRecent(bytes));
+          } catch (e) {
+            setStatus(recentContainer, "Could not parse CFL_DB.dat: " + e.message);
+          }
+        } else {
+          miis = MiiParser.parseActFpDb(bytes);
+          renderMiiList(container, miis);
+        }
+      }, function(err) {
+        var message = err === "HTTP 404" ? "No data available yet - try Refresh in a moment." : ("Could not load: " + err);
+        setStatus(container, message);
+        if (src.kind === "cfldb") setStatus(document.getElementById(SOURCES.recent.listId), message);
+      });
+    }
+
+    loadMiiList("odb");
+    loadMiiList("fp");
+  </script>
+</body>
+
+</html>
