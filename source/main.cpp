@@ -828,10 +828,30 @@ int main() {
                     // since this is what actually lights the 3D LED.
                     gfxSet3D(true);
                     screen = Screen::List;
-                } else if (netState == CtrNetwork::State::Failed || timedOut) {
-                    CtrLog::Printf("network check: failed (wirelessOff=%d timedOut=%d) - showing blocking error screen",
-                                    wirelessOff, timedOut);
+                } else if (netState == CtrNetwork::State::Failed) {
+                    // A genuine failure - acInit()/ACU_ConnectAsync() itself
+                    // returned an error, or the wireless switch is off (see
+                    // wirelessOff above) - neither of those get any less
+                    // true by waiting longer, so this is the one case that
+                    // actually shows the terminal "no internet" error below.
+                    CtrLog::Printf("network check: failed (wirelessOff=%d) - showing blocking error screen", wirelessOff);
                     networkCheckFailed = true; // stays on Screen::NetworkGate - the render block below shows the terminal error text
+                } else if (timedOut) {
+                    // Still "Connecting" per Poll(), just slower than
+                    // kNetworkCheckTimeoutMs this particular round - retry
+                    // rather than declaring failure. Real hardware has been
+                    // observed (New3DS, reported by a user) taking longer
+                    // than 15s to actually associate/get a DHCP lease on
+                    // some networks; the app used to show a false "no
+                    // internet" error at exactly this point even though the
+                    // connection went on to succeed on its own a bit later.
+                    // START still lets anyone who genuinely has no network
+                    // bail out at any time (see its own comment above) - no
+                    // need for a hard ceiling here.
+                    CtrLog::Printf("network check: still connecting after %ums, retrying",
+                                    static_cast<unsigned>(kNetworkCheckTimeoutMs));
+                    networkCheckStartMs = osGetTime();
+                    CtrNetwork::BeginConnect(); // safe to call again - see its own comment
                 }
             }
         }
@@ -842,20 +862,22 @@ int main() {
         // registers immediately regardless of hidKeysDownRepeat()'s own
         // initial-delay timing, while still allowing held-key auto-repeat.
         u32 repeatKeys = hidKeysDownRepeat() | down;
-        // START only exits the app from NetworkGate's own terminal error
-        // state (no network - "Press START to exit" is the hint actually
-        // shown there) - not from the normal list/portrait UI, Mii
-        // details, the server screen, or even NetworkGate's own transient
-        // "Checking network connection..." sub-state. Everywhere else,
-        // HOME (system-level, suspends/closes via the Home Menu - already
-        // the only way out of the Server/Loading screens specifically,
-        // since those disable HOME themselves only for their own duration)
-        // is how the app is meant to be closed, not a dedicated in-app
-        // button - avoids an accidental START press quitting outright
-        // during normal use, with no confirmation, unlike leaving any
-        // other screen in this app (all of which need an explicit
-        // B/Touch).
-        if ((down & KEY_START) && screen == Screen::NetworkGate && networkCheckFailed) break;
+        // START only exits the app from NetworkGate (its terminal error
+        // state, and also its transient "Checking network connection..."
+        // sub-state - a slow-but-not-actually-failed connection now retries
+        // indefinitely instead of giving up after a fixed timeout, see the
+        // timedOut handling above, so anyone who genuinely has no network
+        // needs a way to bail out of that retry loop too) - not from the
+        // normal list/portrait UI, Mii details, or the server screen.
+        // Everywhere else, HOME (system-level, suspends/closes via the Home
+        // Menu - already the only way out of the Server/Loading screens
+        // specifically, since those disable HOME themselves only for their
+        // own duration) is how the app is meant to be closed, not a
+        // dedicated in-app button - avoids an accidental START press
+        // quitting outright during normal use, with no confirmation, unlike
+        // leaving any other screen in this app (all of which need an
+        // explicit B/Touch).
+        if ((down & KEY_START) && screen == Screen::NetworkGate) break;
 
         // "No HOME" icon trigger - unconditional, not screen-gated: relies
         // entirely on !aptIsHomeAllowed() to only ever fire on the screens
@@ -1231,7 +1253,11 @@ int main() {
             C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
             C2D_SceneBegin(bottomTarget);
             AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
-            if (networkCheckFailed) {
+            {
+                // Shown in both NetworkGate sub-states now, not just the
+                // terminal failure one - see KEY_START's own comment above
+                // for why START can cancel out of the "still connecting"
+                // retry loop too.
                 float hintW = 0.0f, hintH = 0.0f;
                 const char *hintText = "Press START to exit";
                 CtrUi::MeasureText(BOTTOM_HINT_SCALE, hintText, &hintW, &hintH);
