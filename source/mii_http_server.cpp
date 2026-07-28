@@ -202,7 +202,7 @@ void SetupAndServe(void *portArg) {
     CtrLog::Printf("MiiHttpServer::SetupAndServe: gethostid() returned %ld", hostId);
     g_assignedIp = static_cast<uint32_t>(hostId);
     if (g_assignedIp == 0) {
-        Fail("Could not determine this console's IP address.");
+        Fail("Could not determine this\nconsole's IP address.");
         return;
     }
 

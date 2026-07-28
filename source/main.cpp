@@ -184,6 +184,27 @@ void DrawScrollArrow(float centerX, float centerY, bool pointingDown) {
 // known, bigger - SERVER_ADDRESS_SCALE) for the dedicated server screen -
 // see main()'s own comment on why this is a whole separate screen (X to
 // enter, B to leave) rather than an always-on background service.
+// Draws `text` (may contain explicit '\n' breaks, same convention as
+// CtrUi::DrawText/DrawTextWrapped) horizontally centered, one line at a
+// time - not CtrUi::DrawTextWrapped(), which only wraps automatically at a
+// fixed pixel width and always left-aligns every resulting line at the same
+// X, so it can't center lines of differing width the way a short manually-
+// broken error message (e.g. HttpServerStatusLines()'s own "Could not
+// determine this\nconsole's IP address." below) needs.
+void DrawTextCenteredMultiline(float centerX, float y, float scale, u32 color, const std::string &text) {
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t nl = text.find('\n', start);
+        std::string line = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        float w = 0.0f, h = 0.0f;
+        CtrUi::MeasureText(scale, line.c_str(), &w, &h);
+        CtrUi::DrawText(centerX - w / 2.0f, y, scale, color, line.c_str());
+        y += h;
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+    }
+}
+
 std::pair<std::string, std::string> HttpServerStatusLines() {
     switch (MiiHttpServer::GetState()) {
         case MiiHttpServer::State::Ready:
@@ -712,9 +733,8 @@ int main() {
             // Single-eye only - gfxSet3D(false) was called on entry, so
             // there's no right-eye target to draw into here.
             auto [serverLine1, serverLine2] = HttpServerStatusLines();
-            float line1W = 0.0f, line1H = 0.0f, line2W = 0.0f, line2H = 0.0f;
+            float line1W = 0.0f, line1H = 0.0f;
             CtrUi::MeasureText(SERVER_LABEL_SCALE, serverLine1.c_str(), &line1W, &line1H);
-            CtrUi::MeasureText(SERVER_ADDRESS_SCALE, serverLine2.c_str(), &line2W, &line2H);
             float centerY = static_cast<float>(TOP_H) / 2.0f;
 
             C2D_TargetClear(topTargetLeft, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
@@ -722,8 +742,12 @@ int main() {
             AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
             CtrUi::DrawText((static_cast<float>(TOP_W) - line1W) / 2.0f, centerY - line1H - 4.0f,
                              SERVER_LABEL_SCALE, C2D_Color32(255, 255, 255, 255), serverLine1.c_str());
-            CtrUi::DrawText((static_cast<float>(TOP_W) - line2W) / 2.0f, centerY + 4.0f, SERVER_ADDRESS_SCALE,
-                             C2D_Color32(255, 255, 255, 255), serverLine2.c_str());
+            // serverLine2 can be a multi-line error (e.g. "Could not
+            // determine this\nconsole's IP address.") - centered per line,
+            // not just as one left-aligned block, see
+            // DrawTextCenteredMultiline()'s own comment.
+            DrawTextCenteredMultiline(static_cast<float>(TOP_W) / 2.0f, centerY + 4.0f, SERVER_ADDRESS_SCALE,
+                                       C2D_Color32(255, 255, 255, 255), serverLine2);
             if (logThisFrame) CtrLog::Printf("frame %d: server-mode top screen drawn", frameCounter);
 
             C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
