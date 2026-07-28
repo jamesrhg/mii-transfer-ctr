@@ -1,5 +1,7 @@
 #include "mii_detail_panel.h"
 
+#include "ctr_log.h"
+#include "ctr_network.h"
 #include "ctr_ui.h"
 #include "mii_image_fetch.h"
 #include "png_texture.h"
@@ -89,6 +91,8 @@ class ImageCache {
 public:
     void SetCap(size_t cap) { cap_ = cap; }
 
+    size_t Count() const { return entries_.size(); }
+
     PngTexture::Texture *Find(int key) {
         for (Entry &entry : entries_) {
             if (entry.key == key) return &entry.tex;
@@ -151,6 +155,8 @@ ImageCache g_cache;
 Tab g_activeTab = Tab::Library;
 int g_focusedIndex = -1;
 PngTexture::Texture *g_tex = nullptr;
+// Only for the transition-logging in Draw() below - not app logic.
+bool g_lastDrawHadValidTex = false;
 
 // Per-tab window start (-1 = no window built yet for that tab). Indexed by
 // static_cast<int>(Tab).
@@ -180,6 +186,8 @@ u64 g_lastFetchFailedAtMs = 0;
 constexpr u64 kRetryBackoffMs = 4000;
 
 void RebuildWindow(Tab tab, const std::vector<Ver3MiiDecoded> &miis, int windowStart) {
+    CtrLog::Printf("MiiDetailPanel: RebuildWindow tab=%d windowStart=%d miis.size()=%zu", static_cast<int>(tab),
+                    windowStart, miis.size());
     g_windowStart[static_cast<int>(tab)] = windowStart;
     int lastIndex = static_cast<int>(miis.size()) - 1;
     int windowEnd = std::min(lastIndex, windowStart + WINDOW_SIZE - 1);
@@ -192,6 +200,7 @@ void RebuildWindow(Tab tab, const std::vector<Ver3MiiDecoded> &miis, int windowS
     std::sort(g_pendingFetch.begin(), g_pendingFetch.end(), [](int a, int b) {
         return std::abs((a % kTabIndexStride) - g_focusedIndex) < std::abs((b % kTabIndexStride) - g_focusedIndex);
     });
+    CtrLog::Printf("MiiDetailPanel: RebuildWindow done, %zu pending", g_pendingFetch.size());
 }
 
 } // namespace
@@ -200,7 +209,21 @@ void SetMaxCachedPortraits(size_t maxPortraits) { g_cache.SetCap(maxPortraits); 
 
 void Init() {}
 
+// Diagnostic only, transition-logged (not every Update() call, which runs
+// every single frame regardless of whether anything changed) - this is
+// specifically to catch the moment the user's own D-pad/touch scrolling
+// moves focus, since that itself is otherwise completely unlogged.
+Tab g_lastLoggedTab = Tab::Library;
+int g_lastLoggedFocusedIndex = -2; // -2, not -1: -1 is itself a real "no focus" value
+
 void Update(Tab tab, const std::vector<Ver3MiiDecoded> &miis, int focusedIndex) {
+    if (tab != g_lastLoggedTab || focusedIndex != g_lastLoggedFocusedIndex) {
+        CtrLog::Printf("MiiDetailPanel::Update: focus now tab=%d index=%d (miis.size()=%zu)",
+                        static_cast<int>(tab), focusedIndex, miis.size());
+        g_lastLoggedTab = tab;
+        g_lastLoggedFocusedIndex = focusedIndex;
+    }
+
     // g_pendingFetch is only ever supposed to hold keys for whichever tab
     // is currently active (see its own comment) - but it's only actually
     // refreshed by RebuildWindow() below, which only runs when *this* tab's
@@ -273,15 +296,60 @@ void Update(Tab tab, const std::vector<Ver3MiiDecoded> &miis, int focusedIndex) 
     if (!g_pendingFetch.empty() && !backoffActive) {
         int key = g_pendingFetch.front();
         g_pendingFetch.erase(g_pendingFetch.begin());
-        int idx = key % kTabIndexStride;
-        MiiImageFetcher::Result fetchResult =
-            MiiImageFetcher::FetchImageBlocking(miis[static_cast<size_t>(idx)].storeData, IMAGE_REQUEST_PX);
+
+        // Checked fresh before every single attempt, not just once at
+        // startup (see main.cpp's own Screen::NetworkGate, which only
+        // checks this before the list is ever shown at all) - confirmed
+        // on-device that turning the wireless switch off *while already
+        // browsing the list*, then scrolling to an uncached Mii, reliably
+        // exits the whole app the moment a fetch is actually attempted
+        // against it - not a graceful Result-code failure this function's
+        // own error handling below could ever catch, since that only
+        // handles errors httpc itself reports back normally. Skipping the
+        // call entirely whenever the switch is confirmed off sidesteps
+        // whatever that failure mode actually is, rather than trying to
+        // catch it after the fact.
         PngTexture::Texture tex{};
-        if (fetchResult.success) tex = PngTexture::LoadFromMemory(fetchResult.pngBytes.data(), fetchResult.pngBytes.size());
+        MiiImageFetcher::Result fetchResult;
+        if (CtrNetwork::IsWirelessSwitchOff()) {
+            CtrLog::Printf("MiiDetailPanel: skipping fetch key=%d, wireless switch is off", key);
+        } else {
+            int idx = key % kTabIndexStride;
+            CtrLog::Printf("MiiDetailPanel: fetching key=%d idx=%d (miis.size()=%zu)", key, idx, miis.size());
+            fetchResult = MiiImageFetcher::FetchImageBlocking(miis[static_cast<size_t>(idx)].storeData, IMAGE_REQUEST_PX);
+            CtrLog::Printf("MiiDetailPanel: fetch key=%d success=%d bytes=%zu", key, fetchResult.success,
+                            fetchResult.pngBytes.size());
+            if (fetchResult.success) {
+                tex = PngTexture::LoadFromMemory(fetchResult.pngBytes.data(), fetchResult.pngBytes.size());
+                CtrLog::Printf("MiiDetailPanel: decode key=%d valid=%d %ux%u", key, tex.valid,
+                                tex.valid ? tex.image.subtex->width : 0, tex.valid ? tex.image.subtex->height : 0);
+            }
+        }
+        // A successfully-decoded but suspiciously tiny image (e.g. a 1x1
+        // "not found"/error placeholder some servers hand back with a real
+        // 200 status instead of a proper face render - PngTexture's own
+        // decode has no way to tell that apart from a real image on its
+        // own, since it's only responsible for PNG bytes -> pixels, not
+        // knowing what any particular caller actually expects to receive)
+        // is still garbage for this specific caller's purposes - rejected
+        // here, not in PngTexture itself (which is shared by AnimatedBg/the
+        // author icon/etc, some of which are legitimately small), the same
+        // as an outright download/decode failure: not cached, not drawn -
+        // confirmed on-device as the cause of a solid-colored block
+        // (a 1x1 texture stretched across the full portrait display size)
+        // in place of the intended "..." placeholder.
+        constexpr u16 kMinValidPortraitPx = 16;
+        if (tex.valid && (tex.image.subtex->width < kMinValidPortraitPx || tex.image.subtex->height < kMinValidPortraitPx)) {
+            CtrLog::Printf("MiiDetailPanel: rejecting key=%d, too small (%ux%u)", key, tex.image.subtex->width,
+                            tex.image.subtex->height);
+            PngTexture::Free(&tex);
+        }
         if (tex.valid) {
             g_cache.Insert(key, tex);
             g_lastFetchFailed = false;
+            CtrLog::Printf("MiiDetailPanel: cached key=%d (cache now has %zu entries)", key, g_cache.Count());
         } else {
+            if (!g_lastFetchFailed) CtrLog::Printf("MiiDetailPanel: entering fetch backoff (key=%d failed)", key);
             g_lastFetchFailed = true;
             g_lastFetchFailedAtMs = osGetTime();
         }
@@ -296,6 +364,19 @@ void Update(Tab tab, const std::vector<Ver3MiiDecoded> &miis, int focusedIndex) 
 
 void Draw(float eyeOffsetPx) {
     if (g_focusedIndex < 0) return;
+
+    // Transition-only (not per-frame) - avoids the exact per-draw-call
+    // logging volume that self-inflicted this app's own worst hang, way
+    // earlier in its history (see ctr_log.h's own comment) - but still
+    // gives visibility into exactly when the focused portrait becomes
+    // available/unavailable, which matters for diagnosing a fetch-failure
+    // bug specifically.
+    bool nowValid = g_tex && g_tex->valid;
+    if (nowValid != g_lastDrawHadValidTex) {
+        CtrLog::Printf("MiiDetailPanel::Draw: g_tex now %s (tab=%d index=%d)", nowValid ? "VALID" : "invalid",
+                        static_cast<int>(g_activeTab), g_focusedIndex);
+        g_lastDrawHadValidTex = nowValid;
+    }
 
     // No background rect behind the portrait - the fetched PNG has its own
     // alpha channel, and drawing an opaque rect here would defeat that,
@@ -315,11 +396,22 @@ void Draw(float eyeOffsetPx) {
         C2D_DrawImageAt(g_tex->image, imageX, IMAGE_Y, 0.0f, nullptr, scale, scale);
     } else {
         // Animated "..." placeholder while the focused Mii's portrait
-        // hasn't finished fetching yet.
-        int dotCount = 1 + (static_cast<int>(osGetTime()) / 400) % 3;
-        CtrUi::DrawText(static_cast<float>(TOP_W) / 2.0f - 6.0f + eyeOffsetPx,
-                         static_cast<float>(IMAGE_Y) + static_cast<float>(IMAGE_HEIGHT_PX) / 2.0f - 8.0f, 0.5f,
-                         Gray(), std::string(dotCount, '.').c_str());
+        // hasn't finished fetching yet. osGetTime() is a u64 millisecond
+        // timestamp large enough that truncating it to a 32-bit int before
+        // this arithmetic can silently produce a negative value (console-
+        // uptime-dependent) - the negative-modulo result would then hit
+        // std::string(size_t count, char)'s unsigned count parameter as a
+        // huge implicit-converted value and throw std::length_error. Do the
+        // division/modulo in u64 space (always non-negative) and only cast
+        // the small [0,2] result down to int at the very end.
+        int dotCount = 1 + static_cast<int>((osGetTime() / 400) % 3);
+        std::string dots(dotCount, '.');
+        constexpr float kDotsScale = 1.0f;
+        float dotsW = 0.0f, dotsH = 0.0f;
+        CtrUi::MeasureText(kDotsScale, dots.c_str(), &dotsW, &dotsH);
+        CtrUi::DrawText(static_cast<float>(TOP_W) / 2.0f - dotsW / 2.0f + eyeOffsetPx,
+                         static_cast<float>(IMAGE_Y) + static_cast<float>(IMAGE_HEIGHT_PX) / 2.0f - dotsH / 2.0f,
+                         kDotsScale, Gray(), dots.c_str());
     }
 }
 

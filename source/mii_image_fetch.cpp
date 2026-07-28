@@ -1,6 +1,7 @@
 #include "mii_image_fetch.h"
 
 #include "base64.h"
+#include "ctr_log.h"
 
 #include <3ds.h>
 
@@ -53,6 +54,21 @@ constexpr int kMaxRedirects = 5;
 constexpr u64 kStatusTimeoutNs = 20LL * 1000 * 1000 * 1000;
 constexpr u32 kDownloadChunkSize = 4096;
 
+// Cancel-then-close, not just close - see PerformGet()'s own top comment
+// (https://github.com/devkitPro/libctru/issues/82: the *original* report
+// there, before the issue got closed for the separate TLS-unusability
+// reason, was "my 3DS freezes whenever a httpc context is closed with
+// httpcCloseContext" - a general statement, not scoped to only a
+// mid-download close) - applied to every httpcCloseContext() call in this
+// file now, not just the one on the mid-download-failure path an earlier
+// version of this function singled out. httpcCancelConnection() on a
+// context that was never actively downloading is expected to be a
+// harmless no-op.
+void CancelAndClose(httpcContext *context) {
+    httpcCancelConnection(context);
+    httpcCloseContext(context);
+}
+
 // Follows up to kMaxRedirects 30x redirects manually (httpc, unlike
 // libcurl, doesn't do this itself), matching the pattern in devkitPro's own
 // http example.
@@ -61,18 +77,26 @@ bool PerformGet(const std::string &url, std::vector<uint8_t> *outBody, const std
 
     for (int redirect = 0; redirect < kMaxRedirects; redirect++) {
         httpcContext context;
-        if (R_FAILED(httpcOpenContext(&context, HTTPC_METHOD_GET, currentUrl.c_str(), 0))) return false;
+        ::Result openResult = httpcOpenContext(&context, HTTPC_METHOD_GET, currentUrl.c_str(), 0);
+        CtrLog::Printf("MiiImageFetcher: httpcOpenContext redirect=%d result=0x%08lX", redirect,
+                        static_cast<unsigned long>(openResult));
+        if (R_FAILED(openResult)) return false;
         httpcSetKeepAlive(&context, HTTPC_KEEPALIVE_DISABLED);
         httpcAddRequestHeaderField(&context, "User-Agent", "mii-transfer-3ds");
 
-        if (R_FAILED(httpcBeginRequest(&context))) {
-            httpcCloseContext(&context);
+        ::Result beginResult = httpcBeginRequest(&context);
+        CtrLog::Printf("MiiImageFetcher: httpcBeginRequest result=0x%08lX", static_cast<unsigned long>(beginResult));
+        if (R_FAILED(beginResult)) {
+            CancelAndClose(&context);
             return false;
         }
 
         u32 statusCode = 0;
-        if (R_FAILED(httpcGetResponseStatusCodeTimeout(&context, &statusCode, kStatusTimeoutNs))) {
-            httpcCloseContext(&context);
+        ::Result statusResult = httpcGetResponseStatusCodeTimeout(&context, &statusCode, kStatusTimeoutNs);
+        CtrLog::Printf("MiiImageFetcher: httpcGetResponseStatusCodeTimeout result=0x%08lX statusCode=%lu",
+                        static_cast<unsigned long>(statusResult), static_cast<unsigned long>(statusCode));
+        if (R_FAILED(statusResult)) {
+            CancelAndClose(&context);
             return false;
         }
 
@@ -84,14 +108,16 @@ bool PerformGet(const std::string &url, std::vector<uint8_t> *outBody, const std
             // namespace resolves to the latter, which isn't compatible with
             // R_FAILED()/R_SUCCEEDED() or httpc's own return values.
             ::Result headerResult = httpcGetResponseHeader(&context, "Location", location, sizeof(location));
-            httpcCloseContext(&context);
+            CtrLog::Printf("MiiImageFetcher: redirect statusCode=%lu headerResult=0x%08lX",
+                            static_cast<unsigned long>(statusCode), static_cast<unsigned long>(headerResult));
+            CancelAndClose(&context);
             if (R_FAILED(headerResult)) return false;
             currentUrl = location;
             continue;
         }
 
         if (statusCode != 200) {
-            httpcCloseContext(&context);
+            CancelAndClose(&context);
             return false;
         }
 
@@ -99,8 +125,8 @@ bool PerformGet(const std::string &url, std::vector<uint8_t> *outBody, const std
         ::Result downloadResult;
         do {
             if (IsCancelled(cancel)) {
-                httpcCancelConnection(&context);
-                httpcCloseContext(&context);
+                CtrLog::Printf("MiiImageFetcher: cancelled mid-download");
+                CancelAndClose(&context);
                 return false;
             }
             u32 downloadedSize = 0;
@@ -108,22 +134,14 @@ bool PerformGet(const std::string &url, std::vector<uint8_t> *outBody, const std
             outBody->insert(outBody->end(), buffer, buffer + downloadedSize);
         } while (downloadResult == static_cast<::Result>(HTTPC_RESULTCODE_DOWNLOADPENDING));
 
-        // httpcCloseContext() hangs forever unless the transfer either
-        // completed or was explicitly cancelled first (see httpc.h's own
-        // doc comment on httpcDownloadData(), and
-        // https://github.com/devkitPro/libctru/issues/82 - the exact bug
-        // that issue was originally about, well before the TLS-unusability
-        // reason it was eventually closed for) - a genuine mid-transfer
-        // error here (not the DOWNLOADPENDING loop exit above, not the
-        // cancel-token path above, but e.g. the connection dropping) would
-        // leave the transfer incomplete, so it needs the same
-        // cancel-before-close treatment.
-        if (R_FAILED(downloadResult)) httpcCancelConnection(&context);
-        httpcCloseContext(&context);
+        CtrLog::Printf("MiiImageFetcher: download done result=0x%08lX bytes=%zu",
+                        static_cast<unsigned long>(downloadResult), outBody->size());
+        CancelAndClose(&context);
         return R_SUCCEEDED(downloadResult) && !outBody->empty();
     }
 
-    return false; // too many redirects
+    CtrLog::Printf("MiiImageFetcher: too many redirects");
+    return false;
 }
 
 } // namespace

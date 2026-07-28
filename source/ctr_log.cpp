@@ -18,7 +18,7 @@ namespace CtrLog {
 // SD-card I/O sitting on the render loop's own thread, a real, physical-
 // latency operation - never something worth shipping on by default. Flip
 // back to true only for active, temporary debugging, never left on.
-constexpr bool kLoggingEnabled = true;
+constexpr bool kLoggingEnabled = false;
 
 namespace {
 // Printf() is called from multiple threads concurrently by design (main.cpp

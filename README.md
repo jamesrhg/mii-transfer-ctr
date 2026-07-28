@@ -90,7 +90,9 @@ connected to any access point.
   platform of origin, etc.) - **B** or a touch anywhere closes it.
 - **X**: host a local HTTP server on the same network (address shown
   top-left) - **B** or a touch anywhere closes it.
-- **START**: exit.
+- **START**: only does anything on the no-network error screen above
+  ("Press START to exit") - everywhere else, close the app via **HOME**
+  instead, same as any other homebrew.
 
 On New3DS, the CPU/L2 cache clock speedup is enabled automatically for the
 duration of the app (`osSetSpeedupEnable()`), and disabled again on exit.

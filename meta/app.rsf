@@ -106,7 +106,18 @@ AccessControlInfo:
   RunnableOnSleep               : false
   SpecialMemoryArrange          : true
 
-  SystemModeExt                 : Legacy
+  # 124MB (not the 178MB max): gives the CIA build an extra ~60MB of FCRAM
+  # on New3DS specifically (Legacy - the previous setting - grants none,
+  # same budget as Old3DS regardless of hardware) while staying compatible
+  # with the New3DS CPU/L2 cache clock speedup this app already toggles at
+  # runtime via osSetSpeedupEnable() (see main.cpp/README.md) - 178MB mode
+  # is documented as mutually exclusive with that speedup, 124MB isn't.
+  # Silently ignored on Old3DS (falls back to the SystemMode above) and on
+  # the .3dsx build entirely (no exheader of its own - see SystemMode's own
+  # comment above) - main.cpp's own portrait-cache sizing (see
+  # MiiDetailPanel::SetMaxCachedPortraits()'s caller) reads back whatever
+  # was actually granted at runtime rather than assuming this took effect.
+  SystemModeExt                 : 124MB
   CpuSpeed                      : 268MHz
   EnableL2Cache                 : false
   CanAccessCore2                 : false

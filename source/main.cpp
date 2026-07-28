@@ -29,6 +29,7 @@
 #include <3ds.h>
 
 #include <algorithm>
+#include <exception>
 #include <malloc.h>
 #include <string>
 #include <vector>
@@ -119,23 +120,28 @@ constexpr float TOP_HINT_SCALE = 0.55f;
 constexpr float TOP_HINT_X = 8.0f;
 constexpr float TOP_HINT_Y = 6.0f;
 
-// Portrait-fetch error banner, directly below the X-to-host reminder above -
-// shown whenever MiiDetailPanel::LastFetchFailed() is true (a download or
-// decode failure, most likely no internet), cleared automatically the
-// moment a later fetch succeeds - see that function's own comment. Red,
-// distinct from every other on-screen text color, since this is the one
-// thing on screen actually reporting an error rather than just status.
-constexpr float TOP_FETCH_ERROR_SCALE = 0.5f;
-constexpr float TOP_FETCH_ERROR_Y = TOP_HINT_Y + 30.0f * TOP_HINT_SCALE + 4.0f;
-
-// App version, top-right corner of the top screen, same row as the X-to-
-// host reminder above. A notch bigger than TOP_HINT_SCALE (system font
-// glyph height is 30px at scale 1.0, so +0.05 is +1.5px) rather than
-// matching it exactly - legible on its own at a glance, not just readable
-// once you already know it's there.
+// App version, top-right corner of the top screen, one row below the
+// X-to-host reminder above rather than sharing its row - that reminder grew
+// wide enough (button icon + "Host local Mii server  " + icon + "Return to
+// HOME Menu") to run into the version text when both were on the same line.
+// A notch bigger than TOP_HINT_SCALE (system font glyph height is 30px at
+// scale 1.0, so +0.05 is +1.5px) rather than matching it exactly - legible
+// on its own at a glance, not just readable once you already know it's
+// there.
 constexpr float TOP_VERSION_SCALE = 0.6f;
 constexpr float TOP_VERSION_MARGIN_X = 8.0f;
+constexpr float TOP_VERSION_Y = TOP_HINT_Y + 30.0f * TOP_HINT_SCALE + 4.0f;
 constexpr const char *APP_VERSION_TEXT = "v1.0.0";
+
+// Portrait-fetch error banner, directly below the X-to-host reminder and
+// version text rows above - shown whenever MiiDetailPanel::LastFetchFailed()
+// is true (a download or decode failure, most likely no internet), cleared
+// automatically the moment a later fetch succeeds - see that function's own
+// comment. Red, distinct from every other on-screen text color, since this
+// is the one thing on screen actually reporting an error rather than just
+// status.
+constexpr float TOP_FETCH_ERROR_SCALE = 0.43f; // 2px smaller than before (system font glyph height is 30px at scale 1.0)
+constexpr float TOP_FETCH_ERROR_Y = TOP_VERSION_Y + 30.0f * TOP_VERSION_SCALE + 4.0f;
 
 // A-to-open Mii details screen (bottom screen only - the top screen keeps
 // showing the same live stereo portrait it always does, since focus doesn't
@@ -169,10 +175,11 @@ constexpr float MAX_3D_DEPTH_PX = 8.0f;
 // Each one is a real, blocking network fetch + decode (see
 // MiiDetailPanel::Update()'s own comment on why nothing here is
 // backgrounded) - lowered from 20 to 10 after it made startup noticeably
-// slow to get through, then raised back to 15 anyway per explicit request
-// (trading some of that responsiveness back for more portraits ready
-// up-front).
-constexpr int INITIAL_PRELOAD_COUNT = 15;
+// slow to get through, then raised back up (15, now 30) anyway per explicit
+// request (trading some of that responsiveness back for more portraits
+// ready up-front - the "(n/N)" progress counter on the loading screen keeps
+// this from feeling stuck even at the higher count).
+constexpr int INITIAL_PRELOAD_COUNT = 30;
 
 // "No HOME" icon (romfs:/homeDisallowed.png) animation timing, shown on a
 // rejected HOME press during the loading screen - see RunInitialPreload()'s
@@ -365,6 +372,46 @@ void DrawHomeIconOverlay(int &animFrame) {
     if (animFrame >= kHomeIconTotalFrames) animFrame = -1; // done - armed for the next press
 }
 
+// Diagnostic only, installed via std::set_terminate() at the very top of
+// main() (right after CtrLog::Init(), so it can log at all): a "silent
+// process exit, no crash screen, no dump" signature - which is exactly
+// what's been reported scrolling to an uncached Mii with no internet - is
+// the classic symptom of an uncaught C++ exception (most plausibly
+// std::bad_alloc, e.g. from std::vector::push_back()/std::string
+// concatenation under real memory pressure - this app is holding onto a
+// lot by the time this could happen: dozens of cached portrait textures,
+// CFL_DB data, AnimatedBg, SFX/BGM, both UI icons, citro3d's own command
+// buffer) rather than a hardware fault, which Luma3DS's own exception
+// dump would otherwise have caught and shown on-screen. This was tried
+// once before, during an earlier (unrelated, now-reverted) investigation
+// into backgrounding the portrait fetch, and never got a definitive
+// answer either way before that work was reverted - worth trying again
+// now, on this specific, still-unexplained crash.
+void LogTerminate() {
+    CtrLog::Printf("std::terminate() called (uncaught exception or fatal library error)");
+    if (std::exception_ptr eptr = std::current_exception()) {
+        try {
+            std::rethrow_exception(eptr);
+        } catch (const std::exception &e) {
+            CtrLog::Printf("  active exception: %s", e.what());
+        } catch (...) {
+            CtrLog::Printf("  active exception: non-std::exception type");
+        }
+    } else {
+        CtrLog::Printf("  no active exception (direct abort()/assert() call)");
+    }
+    std::abort();
+}
+
+// Diagnostic only - newlib mallinfo() (the same allocator malloc/new both
+// go through), to see directly whether the app is running close to its
+// actual heap ceiling by the time a crash like this happens, rather than
+// inferring it indirectly from symptoms alone.
+void LogHeapUsage(const char *label) {
+    struct mallinfo info = mallinfo();
+    CtrLog::Printf("heap[%s]: used=%u KB free=%u KB", label, info.uordblks / 1024, info.fordblks / 1024);
+}
+
 std::vector<uint8_t> ReadFileFully(const char *path) {
     std::vector<uint8_t> out;
     FILE *f = fopen(path, "rb");
@@ -391,7 +438,9 @@ int main() {
     u32 *socBuffer = static_cast<u32 *>(memalign(0x1000, 0x100000));
     bool socOk = socBuffer && R_SUCCEEDED(socInit(socBuffer, 0x100000));
     CtrLog::Init();
+    std::set_terminate(LogTerminate);
     CtrLog::Printf("mii-transfer (floor build) starting up (soc %s)", socOk ? "ok" : "FAILED");
+    LogHeapUsage("startup");
 
     // New3DS-only clock speedup (804MHz + extra L2 cache, vs the 268MHz
     // shared with Old3DS) - toggled at runtime rather than via the CIA's own
@@ -469,7 +518,37 @@ int main() {
     MiiImageFetcher::Start();
     CtrNetwork::BeginConnect();
     MiiDetailPanel::Init();
-    MiiDetailPanel::SetMaxCachedPortraits(35);
+
+    // Scale the portrait cache to whatever APPLICATION memory is actually
+    // free right now (every other subsystem above - AnimatedBg, the author/
+    // home icons, Sfx/bgm, CFL_DB's own data - has already made its
+    // allocations) rather than a single hardcoded constant. This is what
+    // actually lets New3DS's extra FCRAM (meta/app.rsf's
+    // SystemModeExt: 124MB, silently ignored on Old3DS and on the .3dsx
+    // build - see that field's own comment) translate into a bigger cache,
+    // with no New3DS-specific branch needed here: an Old3DS console or a
+    // .3dsx run just reports less free memory and this naturally clamps
+    // down near the old fixed value. 256KB is the per-portrait cost (see
+    // MiiDetailPanel's own WINDOW_SIZE comment: each 210px portrait needs a
+    // 256x256 POT texture, 256*256*4). kCacheHeadroomBytes is reserved for
+    // allocations that still happen *after* this point (the bottom-screen
+    // list's own thumbnails, the local HTTP server's buffers if X is ever
+    // pressed, misc runtime allocations) - a safety margin, not itself
+    // load-bearing math.
+    constexpr u32 kBytesPerCachedPortrait = 256 * 1024;
+    constexpr u32 kCacheHeadroomBytes = 4 * 1024 * 1024;
+    constexpr int kMinCachedPortraits = 35; // this app's old fixed cap - never worse than before
+    constexpr int kMaxCachedPortraits = 300; // this app's own addressable-Mii ceiling - see WINDOW_SIZE's comment
+    u32 freeAppMem = osGetMemRegionFree(MEMREGION_APPLICATION);
+    int cachedPortraitsCap = kMinCachedPortraits;
+    if (freeAppMem > kCacheHeadroomBytes) {
+        cachedPortraitsCap = static_cast<int>((freeAppMem - kCacheHeadroomBytes) / kBytesPerCachedPortrait);
+        cachedPortraitsCap = std::max(cachedPortraitsCap, kMinCachedPortraits);
+        cachedPortraitsCap = std::min(cachedPortraitsCap, kMaxCachedPortraits);
+    }
+    CtrLog::Printf("APPLICATION mem free=%lu KB -> portrait cache cap=%d",
+                    static_cast<unsigned long>(freeAppMem / 1024), cachedPortraitsCap);
+    MiiDetailPanel::SetMaxCachedPortraits(static_cast<size_t>(cachedPortraitsCap));
     CtrLog::Printf("MiiImageFetcher started, AC connect kicked off");
 
     // Fire-and-forget, same shape as CtrNetwork::BeginConnect() above -
@@ -540,12 +619,18 @@ int main() {
     // changing.
     std::string lastGameModeDescription;
 
-    // "No HOME" icon animation state for the server screen - see
-    // DrawHomeIconOverlay()'s own comment for why each HOME-locking screen
-    // owns its own state like this (the loading screen's own equivalent is
-    // local to RunInitialPreload(), since it never needs to persist past
-    // that one call).
-    int serverHomeIconAnimFrame = -1;
+    // "No HOME" icon animation state - one shared counter across every
+    // screen (not per-screen), so an animation already playing when the
+    // loading screen finishes or the server screen closes keeps running to
+    // completion on whatever screen follows, instead of being cut off by
+    // the transition. Triggering is still gated to only the screens that
+    // actually disable HOME (via !aptIsHomeAllowed(), checked once per
+    // frame below, not screen-scoped) - see that check's own comment for
+    // why aptCheckHomePressRejected() alone isn't enough. RunInitialPreload()
+    // captures this by reference (it's a `[&]` lambda) since it can also
+    // start/continue the animation during its own loop, before the main
+    // loop below even begins.
+    int homeIconAnimFrame = -1;
 
     // See the Screen::NetworkGate comment above. IsWirelessSwitchOff()
     // answers immediately (no need to wait through BeginConnect()'s own
@@ -568,8 +653,34 @@ int main() {
     // called from that one spot, with exactly these captures.
     auto RunInitialPreload = [&]() {
         TabState &libraryTab = tabs[static_cast<int>(MiiDetailPanel::Tab::Library)];
+        TabState &recentTab = tabs[static_cast<int>(MiiDetailPanel::Tab::RecentGames)];
+        TabState &friendsTab = tabs[static_cast<int>(MiiDetailPanel::Tab::Friends)];
         libraryTab.focusedIndex = libraryTab.miis.empty() ? -1 : 0;
-        if (libraryTab.miis.empty()) return;
+
+        // Smart preloading: Library first (the default tab the user lands
+        // on), but if it doesn't have enough Miis on its own to fill
+        // INITIAL_PRELOAD_COUNT, fall through to Recent Miis (from
+        // CFL_DB.dat's own embedded CFRA section - always available
+        // synchronously by this point, same file Library itself came from)
+        // and then Friends (FRD - may still be empty here if frdInit()
+        // hasn't finished on its own background thread yet; if so it just
+        // contributes nothing here, same as it always would have, and
+        // those portraits fill in normally later once the user actually
+        // visits that tab) - so a console with a small Mii Library still
+        // gets a full cache's worth of portraits ready up-front instead of
+        // stopping short.
+        struct PreloadSource {
+            MiiDetailPanel::Tab tab;
+            std::vector<Ver3MiiDecoded> *miis;
+        };
+        PreloadSource sources[] = {
+            {MiiDetailPanel::Tab::Library, &libraryTab.miis},
+            {MiiDetailPanel::Tab::RecentGames, &recentTab.miis},
+            {MiiDetailPanel::Tab::Friends, &friendsTab.miis},
+        };
+        bool anySource = false;
+        for (const PreloadSource &src : sources) anySource = anySource || !src.miis->empty();
+        if (!anySource) return;
 
         // The "Loading..." screen, redrawn once per preload iteration (not
         // a single static frame) so it can actually service input and show
@@ -593,48 +704,57 @@ int main() {
         // to this).
         CtrLog::Printf("drawing loading screen, HOME button disabled for its duration");
         aptSetHomeAllowed(false);
-        int homeIconAnimFrame = -1; // -1 = not currently playing - see kHomeIconTotalFrames's own comment
 
-        for (int i = 0; i < INITIAL_PRELOAD_COUNT && aptMainLoop(); i++) {
-            hidScanInput();
-            if (aptCheckHomePressRejected()) {
-                CtrLog::Printf("HOME press rejected during loading screen");
-                if (homeIconAnimFrame < 0) homeIconAnimFrame = 0; // ignored if the animation's already playing
+        int totalDone = 0;
+        for (const PreloadSource &src : sources) {
+            if (totalDone >= INITIAL_PRELOAD_COUNT) break;
+            int countFromThisSource = std::min(static_cast<int>(src.miis->size()), INITIAL_PRELOAD_COUNT - totalDone);
+
+            for (int i = 0; i < countFromThisSource && aptMainLoop(); i++) {
+                hidScanInput();
+                // !aptIsHomeAllowed() too, not just aptCheckHomePressRejected()
+                // alone - see this check's other call site (the main loop
+                // below) for why that matters.
+                if (!aptIsHomeAllowed() && aptCheckHomePressRejected()) {
+                    CtrLog::Printf("HOME press rejected during loading screen");
+                    if (homeIconAnimFrame < 0) homeIconAnimFrame = 0; // ignored if the animation's already playing
+                }
+
+                C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+                CtrUi::BeginFrame();
+
+                // Single-eye only (topTargetLeft) - gfxSet3D(true) isn't
+                // called until this whole lambda returns (see its own call
+                // site), so there's no stereo output to draw for the right
+                // eye at all. "(n/N)" - a real progress count, not just a
+                // spinner: each iteration is a genuinely slow blocking
+                // fetch (see this lambda's own top comment), so showing
+                // *something* moving forward here matters for perceived
+                // responsiveness, not just actual speed.
+                std::string loadingText = "Loading... (" + std::to_string(totalDone + 1) + "/" +
+                                           std::to_string(INITIAL_PRELOAD_COUNT) + ")";
+                float loadingW = 0.0f, loadingH = 0.0f;
+                CtrUi::MeasureText(LOADING_SCALE, loadingText.c_str(), &loadingW, &loadingH);
+                C2D_TargetClear(topTargetLeft, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
+                C2D_SceneBegin(topTargetLeft);
+                AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
+                CtrUi::DrawText((TOP_W - loadingW) / 2.0f, (TOP_H - loadingH) / 2.0f, LOADING_SCALE,
+                                 C2D_Color32(255, 255, 255, 255), loadingText.c_str());
+
+                C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
+                C2D_SceneBegin(bottomTarget);
+                AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
+                DrawHomeIconOverlay(homeIconAnimFrame);
+
+                C3D_FrameEnd(0);
+
+                MiiDetailPanel::Update(src.tab, *src.miis, 0);
+                totalDone++;
             }
-
-            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-            CtrUi::BeginFrame();
-
-            // Single-eye only (topTargetLeft) - gfxSet3D(true) isn't called
-            // until this whole lambda returns (see its own call site), so
-            // there's no stereo output to draw for the right eye at all.
-            // "(n/N)" - a real progress count, not just a spinner: each
-            // iteration is a genuinely slow blocking fetch (see this
-            // lambda's own top comment), so showing *something* moving
-            // forward here matters for perceived responsiveness, not just
-            // actual speed.
-            std::string loadingText = "Loading... (" + std::to_string(i + 1) + "/" +
-                                       std::to_string(INITIAL_PRELOAD_COUNT) + ")";
-            float loadingW = 0.0f, loadingH = 0.0f;
-            CtrUi::MeasureText(LOADING_SCALE, loadingText.c_str(), &loadingW, &loadingH);
-            C2D_TargetClear(topTargetLeft, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
-            C2D_SceneBegin(topTargetLeft);
-            AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
-            CtrUi::DrawText((TOP_W - loadingW) / 2.0f, (TOP_H - loadingH) / 2.0f, LOADING_SCALE,
-                             C2D_Color32(255, 255, 255, 255), loadingText.c_str());
-
-            C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
-            C2D_SceneBegin(bottomTarget);
-            AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
-            DrawHomeIconOverlay(homeIconAnimFrame);
-
-            C3D_FrameEnd(0);
-
-            MiiDetailPanel::Update(MiiDetailPanel::Tab::Library, libraryTab.miis, 0);
         }
 
         aptSetHomeAllowed(true);
-        CtrLog::Printf("initial preload done, HOME button re-enabled");
+        CtrLog::Printf("initial preload done (%d requested across sources), HOME button re-enabled", totalDone);
     };
 
     while (aptMainLoop()) {
@@ -722,24 +842,42 @@ int main() {
         // registers immediately regardless of hidKeysDownRepeat()'s own
         // initial-delay timing, while still allowing held-key auto-repeat.
         u32 repeatKeys = hidKeysDownRepeat() | down;
-        if (down & KEY_START) break;
+        // START only exits the app from NetworkGate's own terminal error
+        // state (no network - "Press START to exit" is the hint actually
+        // shown there) - not from the normal list/portrait UI, Mii
+        // details, the server screen, or even NetworkGate's own transient
+        // "Checking network connection..." sub-state. Everywhere else,
+        // HOME (system-level, suspends/closes via the Home Menu - already
+        // the only way out of the Server/Loading screens specifically,
+        // since those disable HOME themselves only for their own duration)
+        // is how the app is meant to be closed, not a dedicated in-app
+        // button - avoids an accidental START press quitting outright
+        // during normal use, with no confirmation, unlike leaving any
+        // other screen in this app (all of which need an explicit
+        // B/Touch).
+        if ((down & KEY_START) && screen == Screen::NetworkGate && networkCheckFailed) break;
+
+        // "No HOME" icon trigger - unconditional, not screen-gated: relies
+        // entirely on !aptIsHomeAllowed() to only ever fire on the screens
+        // that actually disable it (currently just Server; the loading
+        // screen has its own equivalent inside RunInitialPreload(), before
+        // this loop even starts). aptCheckHomePressRejected() alone isn't
+        // enough here - confirmed on real hardware that it can report a
+        // rejected press even while HOME is *currently* allowed (most
+        // likely a stale/queued event from a previous disallowed window
+        // that hadn't been polled yet), which without this extra guard
+        // showed the icon on a plain, legitimate HOME press. See
+        // homeIconAnimFrame's own comment for why this is a single shared
+        // counter rather than one per screen.
+        if (!aptIsHomeAllowed() && aptCheckHomePressRejected()) {
+            CtrLog::Printf("HOME press rejected");
+            if (homeIconAnimFrame < 0) homeIconAnimFrame = 0; // ignored if the animation's already playing
+        }
 
         if (screen == Screen::Server) {
-            // HOME disabled only for as long as this screen is up (see its
-            // own aptSetHomeAllowed(false) at the KEY_X entry point below) -
-            // to avoid the accept-loop thread's own socket work getting
-            // interrupted mid-request by a HOME-menu suspend. Checked every
-            // frame this screen is active, same shape as the loading
-            // screen's own handling - see DrawHomeIconOverlay()'s own
-            // comment for why the state is per-screen.
-            if (aptCheckHomePressRejected()) {
-                CtrLog::Printf("HOME press rejected during server mode");
-                if (serverHomeIconAnimFrame < 0) serverHomeIconAnimFrame = 0;
-            }
-
             // KEY_TOUCH too, not just KEY_B - this screen has nothing else
             // touch-interactive on it, so a tap anywhere is unambiguous -
-            // see the hint text drawn on it ("Press B/Touch to cancel").
+            // see the hint text drawn on it (B icon + "/Touch: Cancel").
             if (down & (KEY_B | KEY_TOUCH)) {
                 CtrLog::Printf("leaving server mode");
                 MiiHttpServer::Stop();
@@ -755,9 +893,10 @@ int main() {
                 Sfx::Play(Sfx::Sound::Back);
             }
         } else if (screen == Screen::NetworkGate) {
-            // No input to handle here beyond the global KEY_START check
-            // above (already unconditional, works from every screen) - the
-            // gate itself resolves on its own each frame, above.
+            // No input to handle here beyond the KEY_START check above
+            // (which only actually does anything once networkCheckFailed
+            // is true) - the gate itself resolves on its own each frame,
+            // above.
         } else {
             // 3 tabs (Library/Friends/RecentGames), cycled with wraparound.
             // Tab/scroll/focus state lives in `tabs`, indexed by the tab
@@ -962,11 +1101,16 @@ int main() {
             C2D_SceneBegin(bottomTarget);
             AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
             float hintW = 0.0f, hintH = 0.0f;
-            const char *hintText = "Press B/Touch to cancel";
+            // "\xEE\x80\x81" is U+E001, the 3DS shared system font's own B
+            // button icon glyph (Private Use Area codepoint, confirmed
+            // byte-for-byte against a user-supplied reference dump - not
+            // guessed) - embedded as an explicit UTF-8 escape rather than a
+            // literal character since editors/chat pipelines have
+            // repeatedly mangled/stripped this glyph when pasted as-is.
+            const char *hintText = "\xEE\x80\x81/Touch: Cancel";
             CtrUi::MeasureText(BOTTOM_HINT_SCALE, hintText, &hintW, &hintH);
             CtrUi::DrawText((static_cast<float>(BOTTOM_W) - hintW) / 2.0f, (static_cast<float>(BOTTOM_H) - hintH) / 2.0f,
                              BOTTOM_HINT_SCALE, C2D_Color32(200, 200, 200, 255), hintText);
-            DrawHomeIconOverlay(serverHomeIconAnimFrame);
         } else if (screen == Screen::MiiDetails) {
             // Top screen: the same live stereo portrait as the normal list
             // view, unchanged - focus doesn't move while viewing details,
@@ -1044,7 +1188,13 @@ int main() {
             drawInfoLine("Special Mii", details.isSpecial ? "Yes" : "No");
 
             float hintW = 0.0f, hintH = 0.0f;
-            const char *hintText = "Press B/Touch to cancel";
+            // "\xEE\x80\x81" is U+E001, the 3DS shared system font's own B
+            // button icon glyph (Private Use Area codepoint, confirmed
+            // byte-for-byte against a user-supplied reference dump - not
+            // guessed) - embedded as an explicit UTF-8 escape rather than a
+            // literal character since editors/chat pipelines have
+            // repeatedly mangled/stripped this glyph when pasted as-is.
+            const char *hintText = "\xEE\x80\x81/Touch: Cancel";
             CtrUi::MeasureText(BOTTOM_HINT_SCALE, hintText, &hintW, &hintH);
             CtrUi::DrawText((static_cast<float>(BOTTOM_W) - hintW) / 2.0f, static_cast<float>(BOTTOM_H) - hintH - 4.0f,
                              BOTTOM_HINT_SCALE, C2D_Color32(200, 200, 200, 255), hintText);
@@ -1106,8 +1256,8 @@ int main() {
             AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
             MiiDetailPanel::Draw(depthPx / 2.0f);
             CtrUi::DrawText(TOP_HINT_X, TOP_HINT_Y, TOP_HINT_SCALE, C2D_Color32(255, 255, 255, 255),
-                             "Press X to host Mii server");
-            CtrUi::DrawText(versionX, TOP_HINT_Y, TOP_VERSION_SCALE, C2D_Color32(255, 255, 255, 255), APP_VERSION_TEXT);
+                             "\xEE\x80\x82: Host local Mii server  \xEE\x81\xB3: Return to HOME Menu");
+            CtrUi::DrawText(versionX, TOP_VERSION_Y, TOP_VERSION_SCALE, C2D_Color32(255, 255, 255, 255), APP_VERSION_TEXT);
             if (MiiDetailPanel::LastFetchFailed()) {
                 CtrUi::DrawText(TOP_HINT_X, TOP_FETCH_ERROR_Y, TOP_FETCH_ERROR_SCALE, C2D_Color32(255, 70, 70, 255),
                                  "Could not download Mii image - check your internet connection.");
@@ -1118,8 +1268,8 @@ int main() {
             AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
             MiiDetailPanel::Draw(-depthPx / 2.0f);
             CtrUi::DrawText(TOP_HINT_X, TOP_HINT_Y, TOP_HINT_SCALE, C2D_Color32(255, 255, 255, 255),
-                             "Press X to host Mii server");
-            CtrUi::DrawText(versionX, TOP_HINT_Y, TOP_VERSION_SCALE, C2D_Color32(255, 255, 255, 255), APP_VERSION_TEXT);
+                             "\xEE\x80\x82: Host local Mii server  \xEE\x81\xB3: Return to HOME Menu");
+            CtrUi::DrawText(versionX, TOP_VERSION_Y, TOP_VERSION_SCALE, C2D_Color32(255, 255, 255, 255), APP_VERSION_TEXT);
             if (MiiDetailPanel::LastFetchFailed()) {
                 CtrUi::DrawText(TOP_HINT_X, TOP_FETCH_ERROR_Y, TOP_FETCH_ERROR_SCALE, C2D_Color32(255, 70, 70, 255),
                                  "Could not download Mii image - check your internet connection.");
@@ -1173,11 +1323,35 @@ int main() {
                     DrawScrollArrow(SCROLL_ARROW_X, SCROLL_ARROW_BOTTOM_Y, true);
             }
         }
+
+        // "No HOME" icon overlay - drawn last, on top of whatever the
+        // active screen's own bottom-screen content just rendered, and
+        // unconditionally (every screen ends its own rendering with
+        // bottomTarget already the active scene, so no need to re-select
+        // it here). Deliberately *not* gated on `screen` the way triggering
+        // itself is (see that check's own comment) - an animation already
+        // in progress when the loading screen finishes or the server
+        // screen closes keeps playing to completion on whatever screen
+        // follows, rather than being cut off by the transition.
+        DrawHomeIconOverlay(homeIconAnimFrame);
         if (logThisFrame) CtrLog::Printf("frame %d: list drawn, calling C3D_FrameEnd()", frameCounter);
 
         C3D_FrameEnd(0);
         if (logThisFrame) CtrLog::Printf("frame %d: C3D_FrameEnd() returned", frameCounter);
-        if (frameCounter % 300 == 0) CtrLog::Printf("frame %d done", frameCounter);
+        // Diagnostic only, temporarily tightened from every 300 frames to
+        // every 30 (still low volume - one line per ~0.5s, nowhere near
+        // the per-draw-call volume that self-inflicted this app's own
+        // worst hang way earlier in its history) - narrows an on-device
+        // crash's actual timing down to within half a second instead of
+        // five, and the extra state (screen/tab/focus/LastFetchFailed())
+        // gives a snapshot of what the app was actually looking at right
+        // up to the moment logging stops.
+        if (frameCounter % 30 == 0) {
+            CtrLog::Printf("frame %d done (screen=%d tab=%d focus=%d lastFetchFailed=%d)", frameCounter,
+                            static_cast<int>(screen), static_cast<int>(currentTab),
+                            tabs[static_cast<int>(currentTab)].focusedIndex, MiiDetailPanel::LastFetchFailed());
+            LogHeapUsage("periodic");
+        }
     }
 
     CtrLog::Printf("shutting down");
@@ -1190,9 +1364,11 @@ int main() {
     if (isNew3DS) osSetSpeedupEnable(false);
 
     // Same idea as the speedup restore above - defensive, in case the app
-    // exits via KEY_START (the global check at the top of the loop) while
-    // screen == Screen::Server, which skips that screen's own "leaving
-    // server mode" aptSetHomeAllowed(true) entirely.
+    // ends up exiting (aptMainLoop() itself returning false - a system-
+    // triggered close, not a button press; KEY_START can't do this from
+    // the server screen at all anymore, see its own comment) while
+    // screen == Screen::Server, which would otherwise skip that screen's
+    // own "leaving server mode" aptSetHomeAllowed(true) entirely.
     aptSetHomeAllowed(true);
 
     MiiDetailPanel::Shutdown();
