@@ -72,6 +72,13 @@ There are no tests or linters in this project.
 
 ## Running
 
+The app needs real internet access (the portrait fetch and local server both
+depend on it), so it checks for a working connection before showing
+anything else - a "Checking network connection..." screen, then either the
+normal UI or a full-screen error (with **START** to exit) telling you
+specifically whether the wireless radio itself is off or it's on but not
+connected to any access point.
+
 - **D-Pad / Circle Pad**: move focus in the bottom-screen list (scrolls to
   keep it in view).
 - **Touch**: tap a row to focus it (same as moving the D-pad cursor there -

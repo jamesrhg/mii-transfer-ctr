@@ -60,6 +60,37 @@ void BeginConnect() {
     }
 }
 
+bool IsWirelessSwitchOff() {
+    if (!g_acInitialized) return false;
+    u32 status = 0;
+    // Result, not just success/fail: the specific error code is the whole
+    // signal here (see this file's own header comment) - a *different*
+    // failure (or plain success with status 0, meaning "on but not
+    // connected to an access point yet") must not be misreported as the
+    // switch being off.
+    Result res = ACU_GetWifiStatus(&status);
+    return static_cast<u32>(res) == 0xE0A09D2Eu;
+}
+
+State Poll() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_done) return g_connected ? State::Connected : State::Failed;
+    if (!g_connectEvent) return State::Connecting; // BeginConnect() hasn't run/finished setting it up yet
+    // Zero timeout - a real poll, never blocks. Interpretation matches
+    // WaitUntilDone() below: the event firing at all (regardless of timeout
+    // length) is what "connected" means for this API - see that function's
+    // own comment.
+    if (R_SUCCEEDED(svcWaitSynchronization(g_connectEvent, 0))) {
+        svcCloseHandle(g_connectEvent);
+        g_connectEvent = 0;
+        g_connected = true;
+        g_done = true;
+        g_cv.notify_all();
+        return State::Connected;
+    }
+    return State::Connecting;
+}
+
 bool WaitUntilDone() {
     std::unique_lock<std::mutex> lock(g_mutex);
     if (g_done) return g_connected;

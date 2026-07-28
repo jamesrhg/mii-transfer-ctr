@@ -99,6 +99,12 @@ constexpr float SCROLL_ARROW_BOTTOM_Y = static_cast<float>(BOTTOM_H) - 8.0f;
 constexpr float SCROLL_ARROW_HIT_HALF_W = 24.0f;
 constexpr float SCROLL_ARROW_HIT_HALF_H = 14.0f;
 constexpr float NAME_SCALE = 0.55f;
+// Screen::NetworkGate's own error text ("Please enable wireless
+// communications..." / "Please make sure to have set up an internet
+// connection...") - deliberately bigger than every other on-screen label,
+// since it's the one thing on that screen and needs to read clearly at a
+// glance, not be hunted for.
+constexpr float NETWORK_ERROR_SCALE = 0.65f;
 constexpr float LOADING_SCALE = 0.6f;
 
 constexpr uint16_t HTTP_SERVER_PORT = 8080;
@@ -416,51 +422,10 @@ int main() {
     // MiiHttpServer::Start() is deliberately *not* called here yet - see
     // the call site further down, right before the main loop, for why.
 
-    TabState &libraryTab = tabs[static_cast<int>(MiiDetailPanel::Tab::Library)];
-    libraryTab.focusedIndex = libraryTab.miis.empty() ? -1 : 0;
-
-    if (!libraryTab.miis.empty()) {
-        // One "Loading..." frame - just AnimatedBg (kept, per request) and
-        // centered text, no list/portrait yet - then block to fetch the
-        // first INITIAL_PRELOAD_COUNT portraits in a tight loop, all before
-        // the real UI ever shows. This trades a longer single pause at
-        // startup for not showing the list/portrait area gradually filling
-        // in one fetch per rendered frame - see MiiDetailPanel::Update()'s
-        // own comment for why each fetch itself is still synchronous
-        // (blocking, no background thread) regardless of which of these
-        // two pacing styles calls it.
-        CtrLog::Printf("drawing loading screen");
-        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-        CtrUi::BeginFrame();
-
-        // Single-eye only (topTargetLeft) - gfxSet3D(true) hasn't been
-        // called yet at this point (see its own comment further down), so
-        // there's no stereo output to draw for the right eye at all.
-        float loadingW = 0.0f, loadingH = 0.0f;
-        CtrUi::MeasureText(LOADING_SCALE, "Loading...", &loadingW, &loadingH);
-        C2D_TargetClear(topTargetLeft, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
-        C2D_SceneBegin(topTargetLeft);
-        AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
-        CtrUi::DrawText((TOP_W - loadingW) / 2.0f, (TOP_H - loadingH) / 2.0f, LOADING_SCALE,
-                         C2D_Color32(255, 255, 255, 255), "Loading...");
-
-        C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
-        C2D_SceneBegin(bottomTarget);
-        AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
-
-        C3D_FrameEnd(0);
-        CtrLog::Printf("loading screen drawn, preloading first %d portraits", INITIAL_PRELOAD_COUNT);
-
-        for (int i = 0; i < INITIAL_PRELOAD_COUNT; i++) {
-            MiiDetailPanel::Update(MiiDetailPanel::Tab::Library, libraryTab.miis, 0);
-        }
-        CtrLog::Printf("initial preload done");
-    }
-
-    // Only now, right before the real list/portrait UI is what's about to
-    // show - not during the loading screen above (see gfxInitDefault()'s
-    // own comment on why) - since this is what actually lights the 3D LED.
-    gfxSet3D(true);
+    // The "Loading..." + initial-portrait-preload step (previously run
+    // unconditionally right here) now only runs once the network gate
+    // below actually confirms a connection - see RunInitialPreload() and
+    // the NetworkGate handling just above the main loop.
     CtrLog::Printf("entering main loop");
     int frameCounter = 0;
     // The local HTTP server is opt-in, not always-on: it only runs while
@@ -484,8 +449,17 @@ int main() {
     // say, an overlay on top of the list) for the same reason the server
     // screen is: one clear "what am I looking at right now" state instead
     // of combinable modes to reason about.
-    enum class Screen { List, MiiDetails, Server };
-    Screen screen = Screen::List;
+    //
+    // NetworkGate is the startup state (not List): shown until the network
+    // check just below resolves one way or the other, so the list/portrait
+    // UI never comes up against a connection that was never going to work
+    // (see ctr_network.h's own comment - this app's core feature needs real
+    // internet, and letting the normal UI show anyway meant the portrait
+    // fetch path hit real trouble a few frames in instead of failing
+    // cleanly). Not a screen the user can navigate back to - once it
+    // resolves to Connected it becomes List for the rest of the session.
+    enum class Screen { List, MiiDetails, Server, NetworkGate };
+    Screen screen = Screen::NetworkGate;
     MiiDetailPanel::Tab currentTab = MiiDetailPanel::Tab::Library;
     // What was last sent to CtrFriends::UpdateGameModeDescription() - only
     // re-sent when it actually changes (tab switch, a tab's Mii count
@@ -495,6 +469,67 @@ int main() {
     // service, no reason to spam it 60 times a second for text that isn't
     // changing.
     std::string lastGameModeDescription;
+
+    // See the Screen::NetworkGate comment above. IsWirelessSwitchOff()
+    // answers immediately (no need to wait through BeginConnect()'s own
+    // ~15s timeout just to learn the radio itself is off); otherwise the
+    // main loop below polls CtrNetwork::Poll() every frame, bounded by its
+    // own elapsed-time check here since Poll() itself never blocks.
+    bool wirelessOff = CtrNetwork::IsWirelessSwitchOff();
+    CtrLog::Printf("wireless switch: %s", wirelessOff ? "off" : "on (or undetermined)");
+    u64 networkCheckStartMs = osGetTime();
+    constexpr u64 kNetworkCheckTimeoutMs = 15000;
+    // Distinguishes NetworkGate's two sub-states for the render block below:
+    // still polling (show "Checking network connection...") vs a terminal
+    // failure (show the actual error text + "Press START to exit" hint).
+    bool networkCheckFailed = false;
+
+    // The "Loading..." + initial-portrait-preload step this app always ran
+    // unconditionally before the network gate existed - now runs exactly
+    // once, the moment that gate resolves to Connected (see its call site
+    // below). A local lambda, not a free function: it only makes sense
+    // called from that one spot, with exactly these captures.
+    auto RunInitialPreload = [&]() {
+        TabState &libraryTab = tabs[static_cast<int>(MiiDetailPanel::Tab::Library)];
+        libraryTab.focusedIndex = libraryTab.miis.empty() ? -1 : 0;
+        if (libraryTab.miis.empty()) return;
+
+        // One "Loading..." frame - just AnimatedBg (kept, per request) and
+        // centered text, no list/portrait yet - then block to fetch the
+        // first INITIAL_PRELOAD_COUNT portraits in a tight loop, all before
+        // the real UI ever shows. This trades a longer single pause at
+        // startup for not showing the list/portrait area gradually filling
+        // in one fetch per rendered frame - see MiiDetailPanel::Update()'s
+        // own comment for why each fetch itself is still synchronous
+        // (blocking, no background thread) regardless of which of these
+        // two pacing styles calls it.
+        CtrLog::Printf("drawing loading screen");
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        CtrUi::BeginFrame();
+
+        // Single-eye only (topTargetLeft) - gfxSet3D(true) isn't called
+        // until just after this returns (see its own call site), so
+        // there's no stereo output to draw for the right eye at all.
+        float loadingW = 0.0f, loadingH = 0.0f;
+        CtrUi::MeasureText(LOADING_SCALE, "Loading...", &loadingW, &loadingH);
+        C2D_TargetClear(topTargetLeft, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
+        C2D_SceneBegin(topTargetLeft);
+        AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
+        CtrUi::DrawText((TOP_W - loadingW) / 2.0f, (TOP_H - loadingH) / 2.0f, LOADING_SCALE,
+                         C2D_Color32(255, 255, 255, 255), "Loading...");
+
+        C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
+        C2D_SceneBegin(bottomTarget);
+        AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
+
+        C3D_FrameEnd(0);
+        CtrLog::Printf("loading screen drawn, preloading first %d portraits", INITIAL_PRELOAD_COUNT);
+
+        for (int i = 0; i < INITIAL_PRELOAD_COUNT; i++) {
+            MiiDetailPanel::Update(MiiDetailPanel::Tab::Library, libraryTab.miis, 0);
+        }
+        CtrLog::Printf("initial preload done");
+    };
 
     while (aptMainLoop()) {
         frameCounter++;
@@ -532,6 +567,31 @@ int main() {
             CtrLog::Printf("account loaded: current user Mii name \"%s\"", currentUserMiiName.c_str());
         }
 
+        // NetworkGate resolution - see Screen::NetworkGate's own comment.
+        // wirelessOff is already known (checked once, before the loop); a
+        // still-Connecting Poll() here just means keep showing the
+        // "Checking network connection..." frame below and try again next
+        // frame, until either it resolves or kNetworkCheckTimeoutMs passes.
+        if (screen == Screen::NetworkGate) {
+            CtrNetwork::State netState = wirelessOff ? CtrNetwork::State::Failed : CtrNetwork::Poll();
+            bool timedOut = !wirelessOff && netState == CtrNetwork::State::Connecting &&
+                             (osGetTime() - networkCheckStartMs) >= kNetworkCheckTimeoutMs;
+            if (netState == CtrNetwork::State::Connected) {
+                CtrLog::Printf("network check: connected");
+                RunInitialPreload();
+                // Only now, right before the real list/portrait UI is what's
+                // about to show - not during any of the screens before it
+                // (see gfxInitDefault()'s own comment on why) - since this is
+                // what actually lights the 3D LED.
+                gfxSet3D(true);
+                screen = Screen::List;
+            } else if (netState == CtrNetwork::State::Failed || timedOut) {
+                CtrLog::Printf("network check: failed (wirelessOff=%d timedOut=%d) - showing blocking error screen",
+                                wirelessOff, timedOut);
+                networkCheckFailed = true; // stays on Screen::NetworkGate - the render block below shows the terminal error text
+            }
+        }
+
         hidScanInput();
         u32 down = hidKeysDown();
         // down|repeatKeys (not repeatKeys alone): guarantees a single tap
@@ -557,6 +617,10 @@ int main() {
                 screen = Screen::List;
                 Sfx::Play(Sfx::Sound::Back);
             }
+        } else if (screen == Screen::NetworkGate) {
+            // No input to handle here beyond the global KEY_START check
+            // above (already unconditional, works from every screen) - the
+            // gate itself resolves on its own each frame, above.
         } else {
             // 3 tabs (Library/Friends/RecentGames), cycled with wraparound.
             // Tab/scroll/focus state lives in `tabs`, indexed by the tab
@@ -700,6 +764,12 @@ int main() {
                                         : "";
                 if (name.empty()) name = "(no name)";
                 gameModeDescription = "Viewing details of the\n\"" + name + "\" Mii";
+            } else if (screen == Screen::NetworkGate) {
+                // Nothing meaningful to report yet - this state resolves
+                // before the user ever reaches a real tab (see
+                // Screen::NetworkGate's own comment), and FRD very likely
+                // isn't Connected yet either at this point regardless.
+                gameModeDescription = "Waiting for network connection";
             } else {
                 gameModeDescription = GameModeDescriptionText(currentTab, descTab.miis.size());
             }
@@ -839,6 +909,46 @@ int main() {
             CtrUi::MeasureText(BOTTOM_HINT_SCALE, hintText, &hintW, &hintH);
             CtrUi::DrawText((static_cast<float>(BOTTOM_W) - hintW) / 2.0f, static_cast<float>(BOTTOM_H) - hintH - 4.0f,
                              BOTTOM_HINT_SCALE, C2D_Color32(200, 200, 200, 255), hintText);
+        } else if (screen == Screen::NetworkGate) {
+            // Single-eye only (topTargetLeft) - gfxSet3D(true) isn't called
+            // until this gate resolves to Connected (see its own comment),
+            // so there's no stereo output to draw for the right eye at all,
+            // same reasoning as the "Loading..." screen this state precedes.
+            C2D_TargetClear(topTargetLeft, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
+            C2D_SceneBegin(topTargetLeft);
+            AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
+
+            if (!networkCheckFailed) {
+                float w = 0.0f, h = 0.0f;
+                CtrUi::MeasureText(LOADING_SCALE, "Checking network connection...", &w, &h);
+                CtrUi::DrawText((static_cast<float>(TOP_W) - w) / 2.0f, (static_cast<float>(TOP_H) - h) / 2.0f,
+                                 LOADING_SCALE, C2D_Color32(255, 255, 255, 255), "Checking network connection...");
+            } else {
+                // wirelessOff vs "switch is on but no internet" - see
+                // CtrNetwork::IsWirelessSwitchOff()'s own comment for how
+                // these are told apart.
+                const char *message = wirelessOff
+                    ? "Please enable wireless\ncommunications to use\nthis app."
+                    : "Please make sure to have\nset up an internet connection\nbefore using this app.";
+                // Approximate vertical centering for a 3-line block at
+                // NETWORK_ERROR_SCALE (system font glyph height is 30px at
+                // scale 1.0) - DrawTextCenteredMultiline's own y is the top
+                // of the first line, not the block's overall center.
+                float blockH = 3.0f * 30.0f * NETWORK_ERROR_SCALE;
+                DrawTextCenteredMultiline(static_cast<float>(TOP_W) / 2.0f, (static_cast<float>(TOP_H) - blockH) / 2.0f,
+                                           NETWORK_ERROR_SCALE, C2D_Color32(255, 255, 255, 255), message);
+            }
+
+            C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
+            C2D_SceneBegin(bottomTarget);
+            AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
+            if (networkCheckFailed) {
+                float hintW = 0.0f, hintH = 0.0f;
+                const char *hintText = "Press START to exit";
+                CtrUi::MeasureText(BOTTOM_HINT_SCALE, hintText, &hintW, &hintH);
+                CtrUi::DrawText((static_cast<float>(BOTTOM_W) - hintW) / 2.0f, (static_cast<float>(BOTTOM_H) - hintH) / 2.0f,
+                                 BOTTOM_HINT_SCALE, C2D_Color32(200, 200, 200, 255), hintText);
+            }
         } else {
             // Stereoscopic: the portrait is drawn twice, once per eye,
             // shifted in opposite directions by an amount driven by the
