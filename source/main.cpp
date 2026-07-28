@@ -159,20 +159,43 @@ u32 Gray() { return C2D_Color32(170, 170, 180, 255); }
 // too subtle or too aggressive on real hardware.
 constexpr float MAX_3D_DEPTH_PX = 8.0f;
 
-// Deliberately less than MiiDetailPanel's own WINDOW_SIZE (25, see its own
+// Deliberately less than MiiDetailPanel's own WINDOW_SIZE (35, see its own
 // comment for the memory budget behind that number) - this is how many
-// portraits to block-load up front, behind a single "Loading..." screen,
-// before ever showing the real list/portrait UI; the remaining slots up to
+// portraits to block-load up front, behind the "Loading..." screen, before
+// ever showing the real list/portrait UI; the remaining slots up to
 // WINDOW_SIZE fill in gradually, WINDOW_STEP (6) at a time, as the user
-// actually scrolls, rather than making the initial freeze longer than it
+// actually scrolls, rather than making the startup wait longer than it
 // needs to be for portraits that might not even get looked at right away.
-constexpr int INITIAL_PRELOAD_COUNT = 20;
+// Each one is a real, blocking network fetch + decode (see
+// MiiDetailPanel::Update()'s own comment on why nothing here is
+// backgrounded) - lowered from 20 to 10 after it made startup noticeably
+// slow to get through, then raised back to 15 anyway per explicit request
+// (trading some of that responsiveness back for more portraits ready
+// up-front).
+constexpr int INITIAL_PRELOAD_COUNT = 15;
 
-// How long the "HOME Menu is disabled while loading." indicator stays up
-// after a single rejected HOME press (see RunInitialPreload()'s own
-// comment) - the press itself is a one-frame event, so this just gives a
-// human enough time to actually read the message before it clears.
-constexpr u64 kHomeRejectedIndicatorMs = 2000;
+// "No HOME" icon (romfs:/homeDisallowed.png) animation timing, shown on a
+// rejected HOME press during the loading screen - see RunInitialPreload()'s
+// own comment. Frame-counted (this app's render loop is SYNCDRAW-paced, a
+// steady 60fps, so frames are already the natural unit here) rather than
+// wall-clock time, matching the platform's own documented convention for
+// this icon: a linear fade curve, 5 frames fading in, 60 frames held fully
+// visible, 20 frames fading back out - plays once per press; a press while
+// it's already playing is ignored rather than restarting it, so rapid
+// repeated presses can't spam or extend it.
+constexpr int kHomeIconFadeInFrames = 5;
+constexpr int kHomeIconHoldFrames = 60;
+constexpr int kHomeIconFadeOutFrames = 20;
+constexpr int kHomeIconTotalFrames = kHomeIconFadeInFrames + kHomeIconHoldFrames + kHomeIconFadeOutFrames;
+
+// Linear ease in/hold/ease out, per kHomeIcon*Frames above. `frame` is
+// 0-based, expected in [0, kHomeIconTotalFrames).
+float HomeIconAlpha(int frame) {
+    if (frame < kHomeIconFadeInFrames) return static_cast<float>(frame) / static_cast<float>(kHomeIconFadeInFrames);
+    if (frame < kHomeIconFadeInFrames + kHomeIconHoldFrames) return 1.0f;
+    int fadeOutFrame = frame - kHomeIconFadeInFrames - kHomeIconHoldFrames;
+    return 1.0f - static_cast<float>(fadeOutFrame) / static_cast<float>(kHomeIconFadeOutFrames);
+}
 
 // A small right-pointing triangle, vertically centered on a ROW_HEIGHT-tall
 // row starting at rowTop, sitting just left of LIST_LEFT.
@@ -313,6 +336,35 @@ std::string GameModeDescriptionText(MiiDetailPanel::Tab tab, size_t count) {
 // startup over a cosmetic asset.
 PngTexture::Texture g_authorIconTex;
 
+// "No HOME" icon (romfs:/homeDisallowed.png) - loaded once at startup,
+// shared by every screen that disables HOME (currently: the initial
+// "Loading..." screen, and the local-server screen - see their own
+// aptSetHomeAllowed()/aptCheckHomePressRejected() call sites) rather than
+// loaded fresh each time, since both can happen more than once a session
+// (well, Loading only once, but Server can be entered/left repeatedly).
+PngTexture::Texture g_homeIconTex;
+
+// Draws the "no HOME" icon overlay (if `animFrame` is currently playing -
+// see kHomeIconTotalFrames's own comment for the animation shape) centered
+// on the bottom screen, and advances `animFrame` by one - shared between
+// every screen that can show it, each of which owns its own `animFrame`
+// state (a rejected press on one screen doesn't affect an animation
+// already in progress from a different one, though in practice only one of
+// these screens is ever showing at a time anyway). Must be called from
+// within an already-bound bottomTarget scene, once per frame, every frame
+// (this is what actually advances the animation, not just renders it).
+void DrawHomeIconOverlay(int &animFrame) {
+    if (animFrame < 0 || !g_homeIconTex.valid) return;
+    C2D_ImageTint tint;
+    C2D_AlphaImageTint(&tint, HomeIconAlpha(animFrame));
+    float iconW = static_cast<float>(g_homeIconTex.image.subtex->width);
+    float iconH = static_cast<float>(g_homeIconTex.image.subtex->height);
+    C2D_DrawImageAt(g_homeIconTex.image, (static_cast<float>(BOTTOM_W) - iconW) / 2.0f,
+                     (static_cast<float>(BOTTOM_H) - iconH) / 2.0f, 0.0f, &tint, 1.0f, 1.0f);
+    animFrame++;
+    if (animFrame >= kHomeIconTotalFrames) animFrame = -1; // done - armed for the next press
+}
+
 std::vector<uint8_t> ReadFileFully(const char *path) {
     std::vector<uint8_t> out;
     FILE *f = fopen(path, "rb");
@@ -398,7 +450,10 @@ int main() {
     AnimatedBg::Load();
     std::vector<uint8_t> authorIconBytes = ReadFileFully("romfs:/author_icon.png");
     if (!authorIconBytes.empty()) g_authorIconTex = PngTexture::LoadFromMemory(authorIconBytes.data(), authorIconBytes.size());
-    CtrLog::Printf("AnimatedBg loaded, author icon %s", g_authorIconTex.valid ? "loaded" : "MISSING");
+    std::vector<uint8_t> homeIconBytes = ReadFileFully("romfs:/homeDisallowed.png");
+    if (!homeIconBytes.empty()) g_homeIconTex = PngTexture::LoadFromMemory(homeIconBytes.data(), homeIconBytes.size());
+    CtrLog::Printf("AnimatedBg loaded, author icon %s, home icon %s", g_authorIconTex.valid ? "loaded" : "MISSING",
+                    g_homeIconTex.valid ? "loaded" : "MISSING");
 
     // Loads back/confirm/dpad/tab (short, stay resident all session) plus
     // bgm.wav (loaded fully into memory, ~5.8MB - freed automatically by
@@ -414,7 +469,7 @@ int main() {
     MiiImageFetcher::Start();
     CtrNetwork::BeginConnect();
     MiiDetailPanel::Init();
-    MiiDetailPanel::SetMaxCachedPortraits(30);
+    MiiDetailPanel::SetMaxCachedPortraits(35);
     CtrLog::Printf("MiiImageFetcher started, AC connect kicked off");
 
     // Fire-and-forget, same shape as CtrNetwork::BeginConnect() above -
@@ -485,6 +540,13 @@ int main() {
     // changing.
     std::string lastGameModeDescription;
 
+    // "No HOME" icon animation state for the server screen - see
+    // DrawHomeIconOverlay()'s own comment for why each HOME-locking screen
+    // owns its own state like this (the loading screen's own equivalent is
+    // local to RunInitialPreload(), since it never needs to persist past
+    // that one call).
+    int serverHomeIconAnimFrame = -1;
+
     // See the Screen::NetworkGate comment above. IsWirelessSwitchOff()
     // answers immediately (no need to wait through BeginConnect()'s own
     // ~15s timeout just to learn the radio itself is off); otherwise the
@@ -531,13 +593,13 @@ int main() {
         // to this).
         CtrLog::Printf("drawing loading screen, HOME button disabled for its duration");
         aptSetHomeAllowed(false);
-        u64 homeRejectedUntilMs = 0; // >0 while the "HOME Menu is disabled" indicator should be shown
+        int homeIconAnimFrame = -1; // -1 = not currently playing - see kHomeIconTotalFrames's own comment
 
         for (int i = 0; i < INITIAL_PRELOAD_COUNT && aptMainLoop(); i++) {
             hidScanInput();
             if (aptCheckHomePressRejected()) {
                 CtrLog::Printf("HOME press rejected during loading screen");
-                homeRejectedUntilMs = osGetTime() + kHomeRejectedIndicatorMs;
+                if (homeIconAnimFrame < 0) homeIconAnimFrame = 0; // ignored if the animation's already playing
             }
 
             C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -546,24 +608,25 @@ int main() {
             // Single-eye only (topTargetLeft) - gfxSet3D(true) isn't called
             // until this whole lambda returns (see its own call site), so
             // there's no stereo output to draw for the right eye at all.
+            // "(n/N)" - a real progress count, not just a spinner: each
+            // iteration is a genuinely slow blocking fetch (see this
+            // lambda's own top comment), so showing *something* moving
+            // forward here matters for perceived responsiveness, not just
+            // actual speed.
+            std::string loadingText = "Loading... (" + std::to_string(i + 1) + "/" +
+                                       std::to_string(INITIAL_PRELOAD_COUNT) + ")";
             float loadingW = 0.0f, loadingH = 0.0f;
-            CtrUi::MeasureText(LOADING_SCALE, "Loading...", &loadingW, &loadingH);
+            CtrUi::MeasureText(LOADING_SCALE, loadingText.c_str(), &loadingW, &loadingH);
             C2D_TargetClear(topTargetLeft, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
             C2D_SceneBegin(topTargetLeft);
             AnimatedBg::Draw(TOP_W, TOP_H, 0.0f);
             CtrUi::DrawText((TOP_W - loadingW) / 2.0f, (TOP_H - loadingH) / 2.0f, LOADING_SCALE,
-                             C2D_Color32(255, 255, 255, 255), "Loading...");
+                             C2D_Color32(255, 255, 255, 255), loadingText.c_str());
 
             C2D_TargetClear(bottomTarget, C2D_Color32(0x1a, 0x1a, 0x2e, 0xff));
             C2D_SceneBegin(bottomTarget);
             AnimatedBg::Draw(BOTTOM_W, BOTTOM_H, BOTTOM_WORLD_OFFSET_X);
-            if (osGetTime() < homeRejectedUntilMs) {
-                float w = 0.0f, h = 0.0f;
-                const char *text = "HOME Menu is disabled while loading.";
-                CtrUi::MeasureText(BOTTOM_HINT_SCALE, text, &w, &h);
-                CtrUi::DrawText((static_cast<float>(BOTTOM_W) - w) / 2.0f, (static_cast<float>(BOTTOM_H) - h) / 2.0f,
-                                 BOTTOM_HINT_SCALE, C2D_Color32(255, 70, 70, 255), text);
-            }
+            DrawHomeIconOverlay(homeIconAnimFrame);
 
             C3D_FrameEnd(0);
 
@@ -662,6 +725,18 @@ int main() {
         if (down & KEY_START) break;
 
         if (screen == Screen::Server) {
+            // HOME disabled only for as long as this screen is up (see its
+            // own aptSetHomeAllowed(false) at the KEY_X entry point below) -
+            // to avoid the accept-loop thread's own socket work getting
+            // interrupted mid-request by a HOME-menu suspend. Checked every
+            // frame this screen is active, same shape as the loading
+            // screen's own handling - see DrawHomeIconOverlay()'s own
+            // comment for why the state is per-screen.
+            if (aptCheckHomePressRejected()) {
+                CtrLog::Printf("HOME press rejected during server mode");
+                if (serverHomeIconAnimFrame < 0) serverHomeIconAnimFrame = 0;
+            }
+
             // KEY_TOUCH too, not just KEY_B - this screen has nothing else
             // touch-interactive on it, so a tap anywhere is unambiguous -
             // see the hint text drawn on it ("Press B/Touch to cancel").
@@ -669,6 +744,7 @@ int main() {
                 CtrLog::Printf("leaving server mode");
                 MiiHttpServer::Stop();
                 gfxSet3D(true);
+                aptSetHomeAllowed(true); // no need to keep HOME locked once we're leaving
                 screen = Screen::List;
                 Sfx::Play(Sfx::Sound::Back);
             }
@@ -790,10 +866,11 @@ int main() {
             MiiDetailPanel::Update(currentTab, activeTab.miis, activeTab.focusedIndex);
 
             if (down & KEY_X) {
-                CtrLog::Printf("entering server mode");
+                CtrLog::Printf("entering server mode, HOME button disabled while it's up");
                 screen = Screen::Server;
                 gfxSet3D(false);
                 MiiHttpServer::Start(HTTP_SERVER_PORT);
+                aptSetHomeAllowed(false);
                 Sfx::Play(Sfx::Sound::Confirm);
             } else if ((down & KEY_A) && activeTab.focusedIndex >= 0) {
                 screen = Screen::MiiDetails;
@@ -889,6 +966,7 @@ int main() {
             CtrUi::MeasureText(BOTTOM_HINT_SCALE, hintText, &hintW, &hintH);
             CtrUi::DrawText((static_cast<float>(BOTTOM_W) - hintW) / 2.0f, (static_cast<float>(BOTTOM_H) - hintH) / 2.0f,
                              BOTTOM_HINT_SCALE, C2D_Color32(200, 200, 200, 255), hintText);
+            DrawHomeIconOverlay(serverHomeIconAnimFrame);
         } else if (screen == Screen::MiiDetails) {
             // Top screen: the same live stereo portrait as the normal list
             // view, unchanged - focus doesn't move while viewing details,
@@ -1111,6 +1189,12 @@ int main() {
     // left running at this app's own requested clock speed.
     if (isNew3DS) osSetSpeedupEnable(false);
 
+    // Same idea as the speedup restore above - defensive, in case the app
+    // exits via KEY_START (the global check at the top of the loop) while
+    // screen == Screen::Server, which skips that screen's own "leaving
+    // server mode" aptSetHomeAllowed(true) entirely.
+    aptSetHomeAllowed(true);
+
     MiiDetailPanel::Shutdown();
     MiiImageFetcher::Stop();
     MiiHttpServer::Stop();
@@ -1119,6 +1203,7 @@ int main() {
     CtrAccount::Shutdown();
     AnimatedBg::Unload();
     PngTexture::Free(&g_authorIconTex);
+    PngTexture::Free(&g_homeIconTex);
     Sfx::Shutdown();
     CtrUi::Shutdown();
 

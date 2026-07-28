@@ -34,17 +34,17 @@ constexpr int IMAGE_Y = TOP_H - IMAGE_HEIGHT_PX;
 // "Loading..." screen, and as focus moves outside the currently cached
 // window, this replenishes WINDOW_STEP (6) at a time (evicting the
 // WINDOW_STEP farthest-from-focus entries) rather than one at a time - see
-// this file's own comment on WINDOW_SIZE's memory math for why 30, not
+// this file's own comment on WINDOW_SIZE's memory math for why 35, not
 // more.
 //
-// WINDOW_SIZE=30 sized against this app's own measured free linear heap on
+// WINDOW_SIZE=35 sized against this app's own measured free linear heap on
 // Old3DS (~23-24MB, under this CIA's own SystemMode:64MB - see
 // meta/README-cia.md, the same 64MB a .3dsx already got from Homebrew
 // Launcher's own Prod default, so this isn't a bigger budget than before):
 // each 210px portrait needs a 256x256 POT texture (210 rounds up to the
-// next power of two) = 256*256*4 = 256KB. 30 of those is 7.5MB, still
-// leaving comfortable headroom for CFL_DB data, AnimatedBg's own texture,
-// SFX/BGM, the GPU command buffer, and text buffers. This cap is
+// next power of two) = 256*256*4 = 256KB. 35 of those is 8.75MB, still
+// leaving comfortable headroom (~14-15MB) for CFL_DB data, AnimatedBg's own
+// texture, SFX/BGM, the GPU command buffer, and text buffers. This cap is
 // deliberately independent of how many Miis actually exist - across all
 // three tabs this app can have up to 200 from CFL_DB.dat alone (100
 // Library + 100 embedded CFRA "recent Miis", see ctr_mii_db.h) plus 100
@@ -64,7 +64,7 @@ constexpr int IMAGE_Y = TOP_H - IMAGE_HEIGHT_PX;
 // caused). Reverted back to this synchronous design, which is the one
 // actually confirmed stable across this project's entire history - see
 // this file's own comment on Update()'s fetch pacing below.
-constexpr int WINDOW_SIZE = 30;
+constexpr int WINDOW_SIZE = 35;
 constexpr int WINDOW_STEP = 6;
 
 // Cache keys are composite: tab * kTabIndexStride + index within that tab's
